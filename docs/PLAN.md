@@ -4,7 +4,7 @@ APEX: Lean 수준의 의존 타입·증명 + Rust식 소유권/빌림/트레잇�
 
 ## 결정 사항
 - 이론: CIC 계열 커널 + QTT 곱셈수(0 소거 / 1 소유 / ω 복사)
-- 빌림: 커널 밖, MIR 수준 NLL식 borrow checker
+- 빌림: 커널 밖, MIR 수준 NLL식 borrow checker. **모델 확정: Rust식 (공유 XOR 가변) + 라이프타임 생략 규칙, 필요 시에만 명시 `'a`** (Hylo식은 참조 반환/구조체 저장 제약이 커서 제외. 이후 Polonius로 개선 가능)
 - 메모리: 소유권 + Drop, RC는 라이브러리(Rc/Arc)
 - 증명(theorem/tactic)은 1급
 - 백엔드: 트리 인터프리터 → Cranelift
@@ -31,5 +31,6 @@ apex-span, apex-syntax, apex-kernel, apex-elab, apex-tactic, apex-mir, apex-borr
 3. 커널 건전성 → 최소 커널 + 독립 검증기 + proptest
 4. 범위 폭주 → M4까지를 먼저 완성
 
-## 미결정
-- 빌림 모델: Rust식 명시 라이프타임 vs Hylo식 가변 값 의미론
+## 진행 상황
+- M0 완료, M1 완료(파서, AST, 위치 진단, UI 테스트). 다음: M2 커널
+- M1 한계: 에러 복구 없음(첫 오류에서 중단), `apex fmt` 미구현

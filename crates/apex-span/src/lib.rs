@@ -49,3 +49,35 @@ mod tests {
         assert_eq!(Span::new(4, 5).line_col(src), (2, 2));
     }
 }
+
+/// Render an error with a source excerpt, in the style of rustc.
+pub fn render_diagnostic(path: &str, src: &str, msg: &str, span: Span) -> String {
+    let (line, col) = span.line_col(src);
+    let text = src.lines().nth(line - 1).unwrap_or("");
+    let pad = " ".repeat(line.to_string().len());
+    let end = (span.end as usize).min(src.len());
+    let width = src[span.start as usize..end]
+        .chars()
+        .take_while(|&c| c != '\n')
+        .count()
+        .max(1);
+    format!(
+        "error: {msg}\n{pad}--> {path}:{line}:{col}\n{pad} |\n{line} | {text}\n{pad} | {}{}\n",
+        " ".repeat(col - 1),
+        "^".repeat(width)
+    )
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    #[test]
+    fn renders_caret() {
+        let out = render_diagnostic("a.apex", "let x;\nfoo bar", "bad", Span::new(11, 14));
+        assert_eq!(
+            out,
+            "error: bad\n --> a.apex:2:5\n  |\n2 | foo bar\n  |     ^^^\n"
+        );
+    }
+}

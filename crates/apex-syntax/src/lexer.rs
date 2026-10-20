@@ -7,6 +7,7 @@ pub enum TokenKind {
     Ident(String),
     Nat(u64),
     Str(String),
+    Lifetime(String),
     // keywords
     Fn,
     Struct,
@@ -20,6 +21,9 @@ pub enum TokenKind {
     Own,
     Mut,
     Unsafe,
+    For,
+    If,
+    Else,
     // punctuation
     LParen,
     RParen,
@@ -75,6 +79,9 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "own" => Own,
         "mut" => Mut,
         "unsafe" => Unsafe,
+        "for" => For,
+        "if" => If,
+        "else" => Else,
         "_" => Underscore,
         _ => return None,
     })
@@ -140,6 +147,19 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             }
             let s = &src[start..i];
             keyword(s).unwrap_or_else(|| Ident(s.to_string()))
+        } else if c == b'\'' {
+            i += 1;
+            let name_start = i;
+            while i < b.len() && (b[i] == b'_' || b[i].is_ascii_alphanumeric()) {
+                i += 1;
+            }
+            if i == name_start {
+                return Err(LexError {
+                    msg: "expected lifetime name after `'`".into(),
+                    span: Span::new(start, i),
+                });
+            }
+            Lifetime(src[start..i].to_string())
         } else if c == b'"' {
             i += 1;
             let mut s = String::new();
@@ -228,6 +248,59 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
     Ok(out)
 }
 
+impl std::fmt::Display for TokenKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use TokenKind::*;
+        let s = match self {
+            Ident(s) => return write!(f, "identifier `{s}`"),
+            Lifetime(s) => return write!(f, "lifetime `{s}`"),
+            Nat(_) => "integer literal",
+            Str(_) => "string literal",
+            Eof => "end of file",
+            Fn => "`fn`",
+            Struct => "`struct`",
+            Enum => "`enum`",
+            Trait => "`trait`",
+            Impl => "`impl`",
+            Theorem => "`theorem`",
+            Let => "`let`",
+            Match => "`match`",
+            By => "`by`",
+            Own => "`own`",
+            Mut => "`mut`",
+            Unsafe => "`unsafe`",
+            For => "`for`",
+            If => "`if`",
+            Else => "`else`",
+            LParen => "`(`",
+            RParen => "`)`",
+            LBrace => "`{`",
+            RBrace => "`}`",
+            LBracket => "`[`",
+            RBracket => "`]`",
+            Comma => "`,`",
+            Semi => "`;`",
+            Colon => "`:`",
+            ColonEq => "`:=`",
+            Arrow => "`->`",
+            FatArrow => "`=>`",
+            Amp => "`&`",
+            Plus => "`+`",
+            Minus => "`-`",
+            Star => "`*`",
+            Slash => "`/`",
+            Eq => "`=`",
+            EqEq => "`==`",
+            Dot => "`.`",
+            Lt => "`<`",
+            Gt => "`>`",
+            Bar => "`|`",
+            Underscore => "`_`",
+        };
+        f.write_str(s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +339,11 @@ mod tests {
             kinds("/* a /* b */ c */ 1_000 \"h\\n\" // x"),
             vec![Nat(1000), Str("h\n".into()), Eof]
         );
+    }
+
+    #[test]
+    fn lifetimes() {
+        assert_eq!(kinds("&'a mut"), vec![Amp, Lifetime("'a".into()), Mut, Eof]);
     }
 
     #[test]
