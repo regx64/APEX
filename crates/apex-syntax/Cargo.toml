@@ -1,0 +1,7 @@
+[package]
+name = "apex-syntax"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+apex-span = { path = "../apex-span" }

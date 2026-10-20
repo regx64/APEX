@@ -1,0 +1,12 @@
+[package]
+name = "apex-driver"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "apex"
+path = "src/main.rs"
+
+[dependencies]
+apex-span = { path = "../apex-span" }
+apex-syntax = { path = "../apex-syntax" }
