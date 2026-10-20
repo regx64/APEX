@@ -10,3 +10,4 @@ path = "src/main.rs"
 [dependencies]
 apex-span = { path = "../apex-span" }
 apex-syntax = { path = "../apex-syntax" }
+apex-elab = { path = "../apex-elab" }

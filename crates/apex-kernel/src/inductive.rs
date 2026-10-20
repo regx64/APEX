@@ -206,7 +206,7 @@ impl Env {
         let major_ty = mk_apps(&ind_const, &[pargs.clone(), iargs.clone()].concat());
         let major = tc.fresh("t", major_ty, Mult::Omega);
         let motive_ty = tc.mk_pi(&[ifv.clone(), vec![major]].concat(), &sort(elim));
-        let motive = tc.fresh("motive", motive_ty, Mult::Omega);
+        let motive = tc.fresh("motive", motive_ty, Mult::Zero);
         let motive_t = fvar(motive);
 
         let mut minors = Vec::new();

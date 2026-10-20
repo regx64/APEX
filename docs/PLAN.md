@@ -32,5 +32,5 @@ apex-span, apex-syntax, apex-kernel, apex-elab, apex-tactic, apex-mir, apex-borr
 4. 범위 폭주 → M4까지를 먼저 완성
 
 ## 진행 상황
-- M0, M1 완료. M2 커널 완료 (docs/KERNEL.md). 다음: M3 엘라보레이터
+- M0, M1 완료. M2 커널 완료 (docs/KERNEL.md). M3a 엘라보레이터 1차 완료 (docs/ELAB.md). 다음: M3b (match, 재귀, 트레잇)
 - M1 한계: 에러 복구 없음(첫 오류에서 중단), `apex fmt` 미구현

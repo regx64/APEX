@@ -41,6 +41,8 @@ impl Mult {
 pub enum Term {
     BVar(u32),
     FVar(u32),
+    /// Elaboration metavariable; rejected by the kernel proper.
+    MVar(u32),
     Sort(Level),
     Const(Name, Vec<Level>),
     App(T, T),
@@ -55,6 +57,9 @@ pub fn bvar(i: u32) -> T {
 }
 pub fn fvar(i: u32) -> T {
     Rc::new(Term::FVar(i))
+}
+pub fn mvar(i: u32) -> T {
+    Rc::new(Term::MVar(i))
 }
 pub fn sort(l: Level) -> T {
     Rc::new(Term::Sort(l))
@@ -107,7 +112,7 @@ fn inst_at(t: &T, val: &T, d: u32) -> T {
                 t.clone()
             }
         }
-        Term::FVar(_) | Term::Sort(_) | Term::Const(..) => t.clone(),
+        Term::FVar(_) | Term::MVar(_) | Term::Sort(_) | Term::Const(..) => t.clone(),
         Term::App(f, a) => app(inst_at(f, val, d), inst_at(a, val, d)),
         Term::Lam(m, ty, b) => lam(*m, inst_at(ty, val, d), inst_at(b, val, d + 1)),
         Term::Pi(m, ty, b) => pi(*m, inst_at(ty, val, d), inst_at(b, val, d + 1)),
@@ -135,7 +140,7 @@ fn abs_at(t: &T, fvars: &[u32], d: u32) -> T {
             Some(j) => bvar(d + (fvars.len() - 1 - j) as u32),
             None => t.clone(),
         },
-        Term::BVar(_) | Term::Sort(_) | Term::Const(..) => t.clone(),
+        Term::BVar(_) | Term::MVar(_) | Term::Sort(_) | Term::Const(..) => t.clone(),
         Term::App(f, a) => app(abs_at(f, fvars, d), abs_at(a, fvars, d)),
         Term::Lam(m, ty, b) => lam(*m, abs_at(ty, fvars, d), abs_at(b, fvars, d + 1)),
         Term::Pi(m, ty, b) => pi(*m, abs_at(ty, fvars, d), abs_at(b, fvars, d + 1)),
@@ -204,7 +209,7 @@ pub fn instantiate_levels(t: &T, params: &[Name], ls: &[Level]) -> T {
             instantiate_levels(v, params, ls),
             instantiate_levels(b, params, ls),
         ),
-        Term::BVar(_) | Term::FVar(_) => t.clone(),
+        Term::BVar(_) | Term::FVar(_) | Term::MVar(_) => t.clone(),
     }
 }
 
@@ -225,7 +230,60 @@ pub fn collect_level_params(t: &T, out: &mut Vec<Name>) {
             collect_level_params(v, out);
             collect_level_params(b, out);
         }
-        Term::BVar(_) | Term::FVar(_) => {}
+        Term::BVar(_) | Term::FVar(_) | Term::MVar(_) => {}
+    }
+}
+
+/// Beta-reduce while the head is a λ applied to arguments.
+pub fn head_beta(t: &T) -> T {
+    let (mut f, args) = app_spine(t);
+    let mut i = 0;
+    while i < args.len() {
+        let next = match &*f {
+            Term::Lam(_, _, b) => instantiate(b, &args[i]),
+            _ => break,
+        };
+        f = next;
+        i += 1;
+    }
+    mk_apps(&f, &args[i..])
+}
+
+/// The first metavariable occurring in `t`, if any.
+pub fn first_mvar(t: &T) -> Option<u32> {
+    match &**t {
+        Term::MVar(i) => Some(*i),
+        Term::App(f, a) => first_mvar(f).or_else(|| first_mvar(a)),
+        Term::Lam(_, ty, b) | Term::Pi(_, ty, b) => first_mvar(ty).or_else(|| first_mvar(b)),
+        Term::Let(_, ty, v, b) => first_mvar(ty)
+            .or_else(|| first_mvar(v))
+            .or_else(|| first_mvar(b)),
+        _ => None,
+    }
+}
+
+pub fn has_level_mvar(t: &T) -> bool {
+    match &**t {
+        Term::Sort(l) => l.has_mvar(),
+        Term::Const(_, ls) => ls.iter().any(|l| l.has_mvar()),
+        Term::App(f, a) => has_level_mvar(f) || has_level_mvar(a),
+        Term::Lam(_, ty, b) | Term::Pi(_, ty, b) => has_level_mvar(ty) || has_level_mvar(b),
+        Term::Let(_, ty, v, b) => has_level_mvar(ty) || has_level_mvar(v) || has_level_mvar(b),
+        _ => false,
+    }
+}
+
+pub fn contains_mvar_id(t: &T, id: u32) -> bool {
+    match &**t {
+        Term::MVar(i) => *i == id,
+        Term::App(f, a) => contains_mvar_id(f, id) || contains_mvar_id(a, id),
+        Term::Lam(_, ty, b) | Term::Pi(_, ty, b) => {
+            contains_mvar_id(ty, id) || contains_mvar_id(b, id)
+        }
+        Term::Let(_, ty, v, b) => {
+            contains_mvar_id(ty, id) || contains_mvar_id(v, id) || contains_mvar_id(b, id)
+        }
+        _ => false,
     }
 }
 
@@ -243,6 +301,7 @@ pub fn fmt_term(t: &T, names: &dyn Fn(u32) -> String) -> String {
     match &**t {
         Term::BVar(i) => format!("#{i}"),
         Term::FVar(i) => names(*i),
+        Term::MVar(i) => format!("?m{i}"),
         Term::Sort(l) => {
             if l.is_zero() {
                 "Prop".into()

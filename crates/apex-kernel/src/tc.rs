@@ -15,10 +15,18 @@ pub struct TypeChecker<'a> {
     env: &'a Env,
     lctx: HashMap<u32, Local>,
     next: u32,
+    /// Metavariable state. Only the elaborator creates metavariables; a fresh
+    /// checker (as used for the final kernel check) rejects any `MVar`.
+    mvar_types: HashMap<u32, T>,
+    mvar_assign: HashMap<u32, T>,
+    level_assign: HashMap<u32, Level>,
+    next_mvar: u32,
 }
 
-fn levels_equiv(a: &[Level], b: &[Level]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.equiv(y))
+/// Saved assignment state, for backtracking a failed unification attempt.
+pub struct Snapshot {
+    mvar_assign: HashMap<u32, T>,
+    level_assign: HashMap<u32, Level>,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -27,7 +35,159 @@ impl<'a> TypeChecker<'a> {
             env,
             lctx: HashMap::new(),
             next: 0,
+            mvar_types: HashMap::new(),
+            mvar_assign: HashMap::new(),
+            level_assign: HashMap::new(),
+            next_mvar: 0,
         }
+    }
+
+    // ---- metavariables ----
+
+    pub fn new_mvar(&mut self, ty: T) -> T {
+        let id = self.next_mvar;
+        self.next_mvar += 1;
+        self.mvar_types.insert(id, ty);
+        mvar(id)
+    }
+
+    pub fn new_level_mvar(&mut self) -> Level {
+        let id = self.next_mvar;
+        self.next_mvar += 1;
+        Level::MVar(id)
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            mvar_assign: self.mvar_assign.clone(),
+            level_assign: self.level_assign.clone(),
+        }
+    }
+
+    pub fn restore(&mut self, s: Snapshot) {
+        self.mvar_assign = s.mvar_assign;
+        self.level_assign = s.level_assign;
+    }
+
+    /// Substitute assigned metavariables (term and level), beta-reducing
+    /// instantiated heads.
+    pub fn zonk(&self, t: &T) -> T {
+        match &**t {
+            Term::MVar(id) => match self.mvar_assign.get(id) {
+                Some(v) => self.zonk(v),
+                None => t.clone(),
+            },
+            Term::Sort(l) => sort(l.subst_mvars(&self.level_assign)),
+            Term::Const(n, ls) => cnst(
+                n.clone(),
+                ls.iter()
+                    .map(|l| l.subst_mvars(&self.level_assign))
+                    .collect(),
+            ),
+            Term::App(..) => {
+                let (f, args) = app_spine(t);
+                let head_is_mvar = matches!(&*f, Term::MVar(_));
+                let r = mk_apps(
+                    &self.zonk(&f),
+                    &args.iter().map(|a| self.zonk(a)).collect::<Vec<_>>(),
+                );
+                if head_is_mvar {
+                    head_beta(&r)
+                } else {
+                    r
+                }
+            }
+            Term::Lam(m, ty, b) => lam(*m, self.zonk(ty), self.zonk(b)),
+            Term::Pi(m, ty, b) => pi(*m, self.zonk(ty), self.zonk(b)),
+            Term::Let(m, ty, v, b) => let_(*m, self.zonk(ty), self.zonk(v), self.zonk(b)),
+            Term::BVar(_) | Term::FVar(_) => t.clone(),
+        }
+    }
+
+    pub fn zonk_level(&self, l: &Level) -> Level {
+        l.subst_mvars(&self.level_assign)
+    }
+
+    /// Zonk the recorded types of all local variables.
+    pub fn zonk_locals(&mut self) {
+        let ids: Vec<u32> = self.lctx.keys().copied().collect();
+        for id in ids {
+            let ty = self.zonk(&self.lctx[&id].ty);
+            if let Some(l) = self.lctx.get_mut(&id) {
+                l.ty = ty;
+            }
+        }
+    }
+
+    fn level_eq(&mut self, a: &Level, b: &Level) -> bool {
+        let a = a.subst_mvars(&self.level_assign);
+        let b = b.subst_mvars(&self.level_assign);
+        if a.equiv(&b) {
+            return true;
+        }
+        match (&a, &b) {
+            (Level::MVar(m), _) if !b.contains_mvar(*m) => {
+                self.level_assign.insert(*m, b);
+                true
+            }
+            (_, Level::MVar(m)) if !a.contains_mvar(*m) => {
+                self.level_assign.insert(*m, a);
+                true
+            }
+            (Level::Succ(x), Level::Succ(y)) => self.level_eq(x, y),
+            _ => false,
+        }
+    }
+
+    fn levels_eq(&mut self, a: &[Level], b: &[Level]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.level_eq(x, y))
+    }
+
+    /// Unify a metavariable-headed side with the other side (Miller patterns).
+    fn try_assign(&mut self, a: &T, b: &T) -> KResult<Option<bool>> {
+        for (x, y) in [(a, b), (b, a)] {
+            let (h, args) = app_spine(x);
+            let m = match &*h {
+                Term::MVar(m) => *m,
+                _ => continue,
+            };
+            let (h2, _) = app_spine(y);
+            if matches!(&*h2, Term::MVar(m2) if *m2 == m) {
+                return Ok(None);
+            }
+            let mut fvs: Vec<u32> = Vec::new();
+            let mut pattern = true;
+            for arg in &args {
+                match &**arg {
+                    Term::FVar(i) if !fvs.contains(i) => fvs.push(*i),
+                    _ => pattern = false,
+                }
+            }
+            if !pattern {
+                continue;
+            }
+            let rhs = self.zonk(y);
+            if contains_mvar_id(&rhs, m) {
+                return Ok(Some(false));
+            }
+            if args.is_empty() {
+                let Ok(tv) = self.infer(&rhs) else {
+                    return Ok(Some(false));
+                };
+                let mt = self.mvar_types[&m].clone();
+                if !self.is_def_eq(&tv, &mt)? {
+                    return Ok(Some(false));
+                }
+            }
+            let val = if fvs.is_empty() {
+                rhs
+            } else {
+                self.mk_lam(&fvs, &rhs)
+            };
+            self.mvar_assign.insert(m, val);
+            return Ok(Some(true));
+        }
+        Ok(None)
     }
 
     // ---- local context ----
@@ -55,7 +215,7 @@ impl<'a> TypeChecker<'a> {
 
     pub fn pp(&self, t: &T) -> String {
         fmt_term(t, &|i| match self.lctx.get(&i) {
-            Some(l) => format!("{}@{i}", l.name),
+            Some(l) => l.name.to_string(),
             None => format!("_f{i}"),
         })
     }
@@ -143,6 +303,10 @@ impl<'a> TypeChecker<'a> {
     pub fn infer(&mut self, t: &T) -> KResult<T> {
         match &**t {
             Term::BVar(_) => kerr("loose bound variable"),
+            Term::MVar(id) => match self.mvar_types.get(id) {
+                Some(t) => Ok(t.clone()),
+                None => kerr("metavariable in kernel term"),
+            },
             Term::FVar(id) => self.local_ty(*id),
             Term::Sort(l) => Ok(sort(l.clone().succ())),
             Term::Const(n, ls) => self.env.const_type(n, ls),
@@ -283,6 +447,10 @@ impl<'a> TypeChecker<'a> {
         let mut cur = t.clone();
         loop {
             match &*cur.clone() {
+                Term::MVar(id) => match self.mvar_assign.get(id) {
+                    Some(v) => cur = v.clone(),
+                    None => return Ok(cur),
+                },
                 Term::Let(_, _, v, b) => cur = instantiate(b, v),
                 Term::App(..) => {
                     let (f, args) = app_spine(&cur);
@@ -335,8 +503,11 @@ impl<'a> TypeChecker<'a> {
         if a == b {
             return Ok(true);
         }
+        if let Some(r) = self.try_assign(&a, &b)? {
+            return Ok(r);
+        }
         match (&*a, &*b) {
-            (Term::Sort(l1), Term::Sort(l2)) => return Ok(l1.equiv(l2)),
+            (Term::Sort(l1), Term::Sort(l2)) => return Ok(self.level_eq(l1, l2)),
             (Term::Pi(m1, d1, b1), Term::Pi(m2, d2, b2))
             | (Term::Lam(m1, d1, b1), Term::Lam(m2, d2, b2)) => {
                 if m1 != m2 || !self.is_def_eq(d1, d2)? {
@@ -393,8 +564,9 @@ impl<'a> TypeChecker<'a> {
             return Ok(false);
         }
         let same_head = match (&*fa, &*fb) {
-            (Term::Const(n1, l1), Term::Const(n2, l2)) => n1 == n2 && levels_equiv(l1, l2),
+            (Term::Const(n1, l1), Term::Const(n2, l2)) => n1 == n2 && self.levels_eq(l1, l2),
             (Term::FVar(i), Term::FVar(j)) => i == j,
+            (Term::MVar(i), Term::MVar(j)) => i == j,
             _ => false,
         };
         if !same_head {
@@ -434,7 +606,9 @@ impl<'a> TypeChecker<'a> {
     pub fn usage(&mut self, t: &T, x: u32) -> KResult<Mult> {
         match &**t {
             Term::FVar(y) => Ok(if *y == x { Mult::One } else { Mult::Zero }),
-            Term::BVar(_) | Term::Sort(_) | Term::Pi(..) | Term::Const(..) => Ok(Mult::Zero),
+            Term::BVar(_) | Term::MVar(_) | Term::Sort(_) | Term::Pi(..) | Term::Const(..) => {
+                Ok(Mult::Zero)
+            }
             Term::App(f, a) => {
                 let uf = self.usage(f, x)?;
                 let tf = self.infer(f)?;

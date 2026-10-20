@@ -2,6 +2,7 @@
 //! `(base, offset)` atoms meaning `max(base_i + offset_i)`.
 
 use crate::term::Name;
+use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
@@ -12,12 +13,15 @@ pub enum Level {
     Max(Rc<Level>, Rc<Level>),
     IMax(Rc<Level>, Rc<Level>),
     Param(Name),
+    /// Unification variable; only exists while elaborating.
+    MVar(u32),
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Base {
     Zero,
     Param(Name),
+    MVar(u32),
     /// An `imax` whose right side may be zero; compared structurally.
     Stuck(Level),
 }
@@ -58,6 +62,39 @@ impl Level {
                 Some(i) => args[i].clone(),
                 None => self.clone(),
             },
+            Level::MVar(_) => self.clone(),
+        }
+    }
+
+    /// Replace assigned level metavariables.
+    pub fn subst_mvars(&self, m: &HashMap<u32, Level>) -> Level {
+        match self {
+            Level::Zero | Level::Param(_) => self.clone(),
+            Level::MVar(n) => match m.get(n) {
+                Some(l) => l.subst_mvars(m),
+                None => self.clone(),
+            },
+            Level::Succ(l) => l.subst_mvars(m).succ(),
+            Level::Max(a, b) => Level::max(a.subst_mvars(m), b.subst_mvars(m)),
+            Level::IMax(a, b) => Level::imax(a.subst_mvars(m), b.subst_mvars(m)),
+        }
+    }
+
+    pub fn has_mvar(&self) -> bool {
+        match self {
+            Level::MVar(_) => true,
+            Level::Zero | Level::Param(_) => false,
+            Level::Succ(l) => l.has_mvar(),
+            Level::Max(a, b) | Level::IMax(a, b) => a.has_mvar() || b.has_mvar(),
+        }
+    }
+
+    pub fn contains_mvar(&self, id: u32) -> bool {
+        match self {
+            Level::MVar(n) => *n == id,
+            Level::Zero | Level::Param(_) => false,
+            Level::Succ(l) => l.contains_mvar(id),
+            Level::Max(a, b) | Level::IMax(a, b) => a.contains_mvar(id) || b.contains_mvar(id),
         }
     }
 
@@ -70,6 +107,7 @@ impl Level {
                 b.collect_params(out);
             }
             Level::Param(n) => out.push(n.clone()),
+            Level::MVar(_) => {}
         }
     }
 
@@ -77,6 +115,7 @@ impl Level {
         match self {
             Level::Zero => vec![(Base::Zero, 0)],
             Level::Param(n) => vec![(Base::Param(n.clone()), 0)],
+            Level::MVar(n) => vec![(Base::MVar(*n), 0)],
             Level::Succ(l) => l.norm().into_iter().map(|(b, k)| (b, k + 1)).collect(),
             Level::Max(a, b) => {
                 let mut v = a.norm();
@@ -151,6 +190,7 @@ fn from_atoms(v: &Atoms) -> Level {
         let base = match b {
             Base::Zero => Level::Zero,
             Base::Param(n) => Level::Param(n.clone()),
+            Base::MVar(n) => Level::MVar(*n),
             Base::Stuck(l) => l.clone(),
         };
         (0..*k).fold(base, |l, _| l.succ())
@@ -169,6 +209,7 @@ impl fmt::Display for Level {
             Level::Max(a, b) => write!(f, "max({a}, {b})"),
             Level::IMax(a, b) => write!(f, "imax({a}, {b})"),
             Level::Param(n) => write!(f, "{n}"),
+            Level::MVar(n) => write!(f, "?u{n}"),
             Level::Zero => write!(f, "0"),
         }
     }

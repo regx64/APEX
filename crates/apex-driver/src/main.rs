@@ -15,8 +15,18 @@ fn main() -> ExitCode {
             println!("{m:#?}");
             Ok(())
         }),
+        (Some("check"), Some(path)) => run(path, |src| match apex_elab::check_source(path, src) {
+            Ok(_) => {
+                println!("ok: {path}");
+                Ok(())
+            }
+            Err(rendered) => {
+                eprint!("{rendered}");
+                Err((String::new(), apex_span::Span::default()))
+            }
+        }),
         _ => {
-            eprintln!("usage: apex <lex|parse> <file.apex>");
+            eprintln!("usage: apex <lex|parse|check> <file.apex>");
             ExitCode::from(2)
         }
     }
@@ -33,7 +43,10 @@ fn run(path: &str, f: impl FnOnce(&str) -> Result<(), (String, apex_span::Span)>
     match f(&src) {
         Ok(()) => ExitCode::SUCCESS,
         Err((msg, span)) => {
-            eprint!("{}", apex_span::render_diagnostic(path, &src, &msg, span));
+            // an empty message means the callee already printed its diagnostic
+            if !msg.is_empty() {
+                eprint!("{}", apex_span::render_diagnostic(path, &src, &msg, span));
+            }
             ExitCode::FAILURE
         }
     }

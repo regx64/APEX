@@ -4,8 +4,9 @@ use crate::builder::*;
 use crate::env::{Env, KResult};
 use crate::inductive::InductiveDecl;
 use crate::level::Level;
+use crate::term::Mult;
 
-/// `Eq`, `Nat`, `Nat.add` and `List`.
+/// `Eq`, `Nat`, `Nat.add`, `Nat.mul`, `Bool`, `Unit` and `List`.
 pub fn add_prelude(env: &mut Env) -> KResult<()> {
     let u = Level::param("u");
 
@@ -14,7 +15,8 @@ pub fn add_prelude(env: &mut Env) -> KResult<()> {
         name: "Eq".into(),
         lparams: vec!["u".into()],
         nparams: 2,
-        ty: pi_(
+        ty: pi_m(
+            Mult::Zero,
             "α",
             sort_(u.clone()),
             pi_("a", v("α"), arrow(v("α"), prop())),
@@ -22,7 +24,8 @@ pub fn add_prelude(env: &mut Env) -> KResult<()> {
         .build()?,
         ctors: vec![(
             "Eq.refl".into(),
-            pi_(
+            pi_m(
+                Mult::Zero,
                 "α",
                 sort_(u.clone()),
                 pi_(
@@ -77,6 +80,56 @@ pub fn add_prelude(env: &mut Env) -> KResult<()> {
         .build()?,
     )?;
 
+    // def Nat.mul (n m : Nat) : Nat := Nat.rec (fun _ => Nat) 0 (fun _ ih => ih + n) m
+    env.add_def(
+        "Nat.mul",
+        &[],
+        arrow(nat(), arrow(nat(), nat())).build()?,
+        lam_(
+            "n",
+            nat(),
+            lam_(
+                "m",
+                nat(),
+                app_(
+                    cl("Nat.rec", vec![Level::of_nat(1)]),
+                    vec![
+                        lam_("_", nat(), nat()),
+                        c("Nat.zero"),
+                        lam_(
+                            "k",
+                            nat(),
+                            lam_("ih", nat(), app_(c("Nat.add"), vec![v("ih"), v("n")])),
+                        ),
+                        v("m"),
+                    ],
+                ),
+            ),
+        )
+        .build()?,
+    )?;
+
+    // inductive Bool : Type | false | true      (constructor order matters for Bool.rec)
+    env.add_inductive(InductiveDecl {
+        name: "Bool".into(),
+        lparams: vec![],
+        nparams: 0,
+        ty: type_().build()?,
+        ctors: vec![
+            ("Bool.false".into(), c("Bool").build()?),
+            ("Bool.true".into(), c("Bool").build()?),
+        ],
+    })?;
+
+    // inductive Unit : Type | unit
+    env.add_inductive(InductiveDecl {
+        name: "Unit".into(),
+        lparams: vec![],
+        nparams: 0,
+        ty: type_().build()?,
+        ctors: vec![("Unit.unit".into(), c("Unit").build()?)],
+    })?;
+
     // inductive List.{u} (α : Type u) : Type u | nil | cons (head : α) (tail : List α)
     let tu = || sort_(u.clone().succ());
     let list_a = || app_(cl("List", vec![u.clone()]), vec![v("α")]);
@@ -84,12 +137,21 @@ pub fn add_prelude(env: &mut Env) -> KResult<()> {
         name: "List".into(),
         lparams: vec!["u".into()],
         nparams: 1,
-        ty: pi_("α", tu(), tu()).build()?,
+        ty: pi_m(Mult::Zero, "α", tu(), tu()).build()?,
         ctors: vec![
-            ("List.nil".into(), pi_("α", tu(), list_a()).build()?),
+            (
+                "List.nil".into(),
+                pi_m(Mult::Zero, "α", tu(), list_a()).build()?,
+            ),
             (
                 "List.cons".into(),
-                pi_("α", tu(), arrow(v("α"), arrow(list_a(), list_a()))).build()?,
+                pi_m(
+                    Mult::Zero,
+                    "α",
+                    tu(),
+                    arrow(v("α"), arrow(list_a(), list_a())),
+                )
+                .build()?,
             ),
         ],
     })?;

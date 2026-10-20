@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/apex-span", "crates/apex-syntax", "crates/apex-kernel", "crates/apex-driver"]
+members = ["crates/apex-span", "crates/apex-syntax", "crates/apex-kernel", "crates/apex-elab", "crates/apex-driver"]
 
 [workspace.package]
 version = "0.0.1"

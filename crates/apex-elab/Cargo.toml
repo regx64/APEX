@@ -1,0 +1,9 @@
+[package]
+name = "apex-elab"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+apex-span = { path = "../apex-span" }
+apex-syntax = { path = "../apex-syntax" }
+apex-kernel = { path = "../apex-kernel" }
