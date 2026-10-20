@@ -11,6 +11,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "apex-kernel"
+version = "0.0.1"
+
+[[package]]
 name = "apex-span"
 version = "0.0.1"
 
