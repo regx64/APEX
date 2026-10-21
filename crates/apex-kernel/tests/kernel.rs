@@ -446,3 +446,21 @@ fn duplicate_declaration_is_rejected() {
     let mut e = env();
     assert!(e.add_axiom("Nat", &[], type_().build().unwrap()).is_err());
 }
+
+// ---- substitution ----
+
+#[test]
+fn instantiate_shifts_open_values_under_binders() {
+    use apex_kernel::term::{bvar, instantiate, lam, sort};
+    // `fun _ => #1`: the body refers to the outer variable #0
+    let t = lam(Mult::Omega, sort(Level::zero()), bvar(1));
+    // substituting an open value `#5` must shift it past the binder: `fun _ => #6`
+    let r = instantiate(&t, &bvar(5));
+    assert_eq!(r, lam(Mult::Omega, sort(Level::zero()), bvar(6)));
+    // a closed value is unchanged by the shift
+    let c = apex_kernel::term::cnst("X".into(), vec![]);
+    assert_eq!(
+        instantiate(&t, &c),
+        lam(Mult::Omega, sort(Level::zero()), c)
+    );
+}

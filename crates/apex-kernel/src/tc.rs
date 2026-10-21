@@ -214,10 +214,20 @@ impl<'a> TypeChecker<'a> {
     }
 
     pub fn pp(&self, t: &T) -> String {
-        fmt_term(t, &|i| match self.lctx.get(&i) {
+        let s = fmt_term(t, &|i| match self.lctx.get(&i) {
             Some(l) => l.name.to_string(),
             None => format!("_f{i}"),
-        })
+        });
+        // the printer parenthesizes every compound term; drop the outermost pair
+        let compound = matches!(
+            &**t,
+            Term::App(..) | Term::Pi(..) | Term::Lam(..) | Term::Let(..)
+        );
+        if compound && s.starts_with('(') && s.ends_with(')') {
+            s[1..s.len() - 1].to_string()
+        } else {
+            s
+        }
     }
 
     /// Close `body` over `fvars` (outermost first), producing nested Π or λ.

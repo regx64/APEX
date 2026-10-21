@@ -243,6 +243,20 @@ impl<'a> Evaluator<'a> {
                     let (a, b) = (self.force_str(&args[0])?, self.force_str(&args[1])?);
                     Ok(Value::Str(format!("{a}{b}").into()))
                 }
+                "nat_sub" => {
+                    let (a, b) = (self.force_nat(&args[0])?, self.force_nat(&args[1])?);
+                    Ok(Value::Nat(a.saturating_sub(b)))
+                }
+                "nat_beq" | "nat_lt" => {
+                    let (a, b) = (self.force_nat(&args[0])?, self.force_nat(&args[1])?);
+                    let r = if &*info.name == "nat_beq" {
+                        a == b
+                    } else {
+                        a < b
+                    };
+                    let name = if r { "Bool.true" } else { "Bool.false" };
+                    Ok(Value::Ctor(name.into(), Rc::new(vec![])))
+                }
                 "Nat.toString" => Ok(Value::Str(self.force_nat(&args[0])?.to_string().into())),
                 // IO.pure α x / IO.bind α β m k / IO.print s
                 "IO.pure" => Ok(Value::Io(Rc::new(IoAct::Pure(args[1].clone())))),
@@ -340,6 +354,8 @@ impl<'a> Evaluator<'a> {
             "Nat.succ" => fun(Kind::NatSucc, 1),
             "Nat.add" => fun(Kind::NatAdd, 2),
             "Nat.mul" => fun(Kind::NatMul, 2),
+            // native versions of prelude definitions (same behavior, faster)
+            "nat_sub" | "nat_beq" | "nat_lt" => fun(Kind::Prim, 2),
             "String.append" => fun(Kind::Prim, 2),
             "Nat.toString" => fun(Kind::Prim, 1),
             "IO.pure" => fun(Kind::Prim, 2),

@@ -106,16 +106,38 @@ pub fn app_spine(t: &T) -> (T, Vec<T>) {
     (cur, args)
 }
 
-/// Replace `BVar(0)` in `t` by `val` (which must have no loose bound variables).
+/// Replace `BVar(0)` in `t` by `val`. If `val` has loose bound variables they
+/// are shifted as the substitution goes under binders.
 pub fn instantiate(t: &T, val: &T) -> T {
-    inst_at(t, val, 0)
+    inst_at(t, val, has_bvar(val), 0)
 }
 
-fn inst_at(t: &T, val: &T, d: u32) -> T {
+/// Shift loose bound variables (index >= `cutoff`) up by `n`.
+pub fn lift(t: &T, n: u32, cutoff: u32) -> T {
+    match &**t {
+        Term::BVar(i) if *i >= cutoff => bvar(i + n),
+        Term::App(f, a) => app(lift(f, n, cutoff), lift(a, n, cutoff)),
+        Term::Lam(m, ty, b) => lam(*m, lift(ty, n, cutoff), lift(b, n, cutoff + 1)),
+        Term::Pi(m, ty, b) => pi(*m, lift(ty, n, cutoff), lift(b, n, cutoff + 1)),
+        Term::Let(m, ty, v, b) => let_(
+            *m,
+            lift(ty, n, cutoff),
+            lift(v, n, cutoff),
+            lift(b, n, cutoff + 1),
+        ),
+        _ => t.clone(),
+    }
+}
+
+fn inst_at(t: &T, val: &T, open: bool, d: u32) -> T {
     match &**t {
         Term::BVar(i) => {
             if *i == d {
-                val.clone()
+                if open && d > 0 {
+                    lift(val, d, 0)
+                } else {
+                    val.clone()
+                }
             } else if *i > d {
                 bvar(i - 1)
             } else {
@@ -128,14 +150,14 @@ fn inst_at(t: &T, val: &T, d: u32) -> T {
         | Term::Const(..)
         | Term::Lit(_)
         | Term::Str(_) => t.clone(),
-        Term::App(f, a) => app(inst_at(f, val, d), inst_at(a, val, d)),
-        Term::Lam(m, ty, b) => lam(*m, inst_at(ty, val, d), inst_at(b, val, d + 1)),
-        Term::Pi(m, ty, b) => pi(*m, inst_at(ty, val, d), inst_at(b, val, d + 1)),
+        Term::App(f, a) => app(inst_at(f, val, open, d), inst_at(a, val, open, d)),
+        Term::Lam(m, ty, b) => lam(*m, inst_at(ty, val, open, d), inst_at(b, val, open, d + 1)),
+        Term::Pi(m, ty, b) => pi(*m, inst_at(ty, val, open, d), inst_at(b, val, open, d + 1)),
         Term::Let(m, ty, v, b) => let_(
             *m,
-            inst_at(ty, val, d),
-            inst_at(v, val, d),
-            inst_at(b, val, d + 1),
+            inst_at(ty, val, open, d),
+            inst_at(v, val, open, d),
+            inst_at(b, val, open, d + 1),
         ),
     }
 }
@@ -183,6 +205,28 @@ pub fn contains_const(t: &T, name: &str) -> bool {
         Term::Let(_, ty, v, b) => {
             contains_const(ty, name) || contains_const(v, name) || contains_const(b, name)
         }
+        _ => false,
+    }
+}
+
+/// Does `t` contain any bound-variable occurrence?
+pub fn has_bvar(t: &T) -> bool {
+    match &**t {
+        Term::BVar(_) => true,
+        Term::App(f, a) => has_bvar(f) || has_bvar(a),
+        Term::Lam(_, ty, b) | Term::Pi(_, ty, b) => has_bvar(ty) || has_bvar(b),
+        Term::Let(_, ty, v, b) => has_bvar(ty) || has_bvar(v) || has_bvar(b),
+        _ => false,
+    }
+}
+
+/// Does `t` mention any free variable?
+pub fn has_fvar(t: &T) -> bool {
+    match &**t {
+        Term::FVar(_) => true,
+        Term::App(f, a) => has_fvar(f) || has_fvar(a),
+        Term::Lam(_, ty, b) | Term::Pi(_, ty, b) => has_fvar(ty) || has_fvar(b),
+        Term::Let(_, ty, v, b) => has_fvar(ty) || has_fvar(v) || has_fvar(b),
         _ => false,
     }
 }

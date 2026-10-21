@@ -38,6 +38,9 @@ Prop의 inductive는 subsingleton(생성자 0개 또는 필드가 모두 Prop/�
 ## 문자열과 IO (M4b에서 추가)
 `Term::Str`는 `String` 타입의 리터럴. `String`, `IO`, `IO.pure/bind/print`는 공리로 선언돼 커널은 계산하지 않는다.
 
+## 치환 (M3c에서 수정)
+`instantiate`는 대입할 값에 느슨한 de Bruijn 변수가 있으면 바인더를 지나며 `lift`로 올린다 (이전에는 닫힌 값만 가정했다).
+
 ## 알려진 한계 (다음 단계에서 해결)
 - recursor의 바인더는 모두 ω. 선형 필드를 가진 타입의 선형 `match`는 엘라보레이터(M3)/MIR(M5)에서 검사한다.
 - 상호/중첩 inductive, 구조체 프로젝션/η, 자연수 리터럴, K-규칙 없음.

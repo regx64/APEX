@@ -37,14 +37,46 @@ enum Res {
     Global(String),
 }
 
+/// How an application supplies a binder: written out, inferred by unification,
+/// or found by instance search.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Bk {
+    Exp,
+    Imp,
+    Inst,
+}
+
+/// A trait bound: the trait's name and its explicit type arguments.
+type Bound<'e> = (String, &'e [Expr]);
+
 /// Which binders of a constant's type are implicit.
-type Masks = HashMap<String, Vec<bool>>;
+type Masks = HashMap<String, Vec<Bk>>;
 type Aliases = HashMap<String, String>;
+
+/// Trait bookkeeping shared by all declarations.
+#[derive(Default)]
+struct Tables {
+    /// trait name -> its methods (in field order)
+    traits: HashMap<String, TraitInfo>,
+    /// trait name -> instance definitions
+    insts: HashMap<String, Vec<String>>,
+    /// method name -> traits declaring it
+    methods: HashMap<String, Vec<String>>,
+}
+
+#[derive(Clone)]
+struct TraitInfo {
+    /// number of class parameters, `Self` included
+    nparams: usize,
+    methods: Vec<String>,
+}
 
 pub struct Elaborator {
     env: Env,
     masks: Masks,
     aliases: Aliases,
+    tables: Tables,
+    inst_counter: usize,
 }
 
 impl Default for Elaborator {
@@ -59,10 +91,10 @@ impl Elaborator {
         let mut env = Env::new();
         add_prelude(&mut env).expect("kernel prelude must check");
         let mut masks = Masks::new();
-        masks.insert("Eq".into(), vec![true, false, false]);
-        masks.insert("Eq.refl".into(), vec![true, false]);
-        masks.insert("IO.pure".into(), vec![true, false]);
-        masks.insert("IO.bind".into(), vec![true, true, false, false]);
+        masks.insert("Eq".into(), vec![Bk::Imp, Bk::Exp, Bk::Exp]);
+        masks.insert("Eq.refl".into(), vec![Bk::Imp, Bk::Exp]);
+        masks.insert("IO.pure".into(), vec![Bk::Imp, Bk::Exp]);
+        masks.insert("IO.bind".into(), vec![Bk::Imp, Bk::Imp, Bk::Exp, Bk::Exp]);
         let mut aliases = Aliases::new();
         aliases.insert("true".into(), "Bool.true".into());
         aliases.insert("false".into(), "Bool.false".into());
@@ -72,6 +104,8 @@ impl Elaborator {
             env,
             masks,
             aliases,
+            tables: Tables::default(),
+            inst_counter: 0,
         };
         let module = apex_syntax::parse(include_str!("prelude.apex")).expect("prelude must parse");
         el.elab_module(&module)
@@ -96,18 +130,16 @@ impl Elaborator {
             ItemKind::Theorem(t) => self.elab_theorem(t, item.span),
             ItemKind::Enum(e) => self.elab_enum(e, item.span),
             ItemKind::Struct(s) => self.elab_struct(s, item.span),
-            ItemKind::Trait(_) | ItemKind::Impl(_) => err(
-                item.span,
-                "traits and impls are not supported by the elaborator yet (M3b)",
-            ),
+            ItemKind::Trait(t) => self.elab_trait(t, item.span),
+            ItemKind::Impl(i) => self.elab_impl(i, item.span),
         }
     }
 
     fn cx(&self) -> Cx<'_> {
-        Cx::new(&self.env, &self.masks, &self.aliases)
+        Cx::new(&self.env, &self.masks, &self.aliases, &self.tables)
     }
 
-    fn add_def(&mut self, name: &Ident, ty: T, val: T, mask: Vec<bool>) -> R<()> {
+    fn add_def(&mut self, name: &Ident, ty: T, val: T, mask: Vec<Bk>) -> R<()> {
         from_kernel(self.env.add_def(&name.name, &[], ty, val), name.span)?;
         self.masks.insert(name.name.clone(), mask);
         Ok(())
@@ -119,13 +151,13 @@ impl Elaborator {
             .as_ref()
             .is_some_and(|b| mentions_block(b, &f.name.name));
         let (ty, val, mask) = if !recursive {
-            self.try_fn(f, span, None)?
+            self.try_fn(f, span, None, None)?
         } else {
             // structural recursion: try each parameter as the decreasing one
             let mut first_err = None;
             let mut found = None;
             for k in 0..f.params.len() {
-                match self.try_fn(f, span, Some(k)) {
+                match self.try_fn(f, span, Some(k), None) {
                     Ok(r) => {
                         found = Some(r);
                         break;
@@ -151,9 +183,22 @@ impl Elaborator {
 
     /// Elaborate a function; `decr` is the index (among `params`) of the
     /// parameter a recursive function decreases on.
-    fn try_fn(&self, f: &FnDecl, span: Span, decr: Option<usize>) -> R<(T, T, Vec<bool>)> {
+    fn try_fn(
+        &self,
+        f: &FnDecl,
+        span: Span,
+        decr: Option<usize>,
+        self_ty: Option<&Expr>,
+    ) -> R<(T, T, Vec<Bk>)> {
         let mut cx = self.cx();
-        let (fvs, mask) = cx.elab_binders(&f.generics, &f.params)?;
+        let (mut fvs, mut mask) = cx.elab_binders(&f.generics, &[])?;
+        if let Some(e) = self_ty {
+            let t = cx.elab_type(e)?;
+            cx.scope.push(("Self".into(), t));
+        }
+        let (pf, pm) = cx.elab_binders(&[], &f.params)?;
+        fvs.extend(pf);
+        mask.extend(pm);
         if let Some(k) = decr {
             let nparams = f.params.len();
             let explicit: Vec<u32> = fvs[fvs.len() - nparams..].to_vec();
@@ -214,6 +259,16 @@ impl Elaborator {
     fn ind_type(&self, generics: &[Generic], span: Span) -> R<T> {
         let mut cx = self.cx();
         let (pfv, _) = cx.elab_binders(generics, &[])?;
+        let declared = generics
+            .iter()
+            .filter(|g| !g.name.name.starts_with('\''))
+            .count();
+        if pfv.len() != declared {
+            return err(
+                span,
+                "trait bounds on type declarations are not supported yet",
+            );
+        }
         cx.close(&pfv, &sort(Level::of_nat(1)), true, span)
     }
 
@@ -223,9 +278,12 @@ impl Elaborator {
         from_kernel(self.env.add_inductive(decl), span)?;
         for cn in ctor_names {
             // parameters are implicit in constructors
-            self.masks.insert(cn.clone(), vec![true; nparams]);
+            self.masks.insert(cn.clone(), vec![Bk::Imp; nparams]);
             if let Some(short) = cn.strip_prefix(&format!("{name}.")) {
-                if self.env.get(short).is_none() && !self.aliases.contains_key(short) {
+                if short != "mk"
+                    && self.env.get(short).is_none()
+                    && !self.aliases.contains_key(short)
+                {
                     self.aliases.insert(short.to_string(), cn.clone());
                 }
             }
@@ -241,7 +299,7 @@ impl Elaborator {
         from_kernel(scratch.add_axiom(&name, &[], ind_ty.clone()), d.name.span)?;
         let mut ctors = Vec::new();
         {
-            let mut cx = Cx::new(&scratch, &self.masks, &self.aliases);
+            let mut cx = Cx::new(&scratch, &self.masks, &self.aliases, &self.tables);
             for v in &d.variants {
                 let (pfv, _) = cx.elab_binders(&d.generics, &[])?;
                 let mut fields = Vec::new();
@@ -287,7 +345,7 @@ impl Elaborator {
         let mut scratch = self.env.clone();
         from_kernel(scratch.add_axiom(&name, &[], ind_ty.clone()), d.name.span)?;
         let ctor_ty = {
-            let mut cx = Cx::new(&scratch, &self.masks, &self.aliases);
+            let mut cx = Cx::new(&scratch, &self.masks, &self.aliases, &self.tables);
             let tele = cx.struct_telescope(d)?;
             let result = mk_apps(&cnst(name.as_str().into(), vec![]), &tele.pargs());
             let all: Vec<u32> = tele.params.iter().chain(&tele.fields).copied().collect();
@@ -306,39 +364,266 @@ impl Elaborator {
         )?;
         // projections: S.f := fun params (self : S params) => S.rec (fun _ => T_f) (fun fields => f) self
         for (j, field) in d.fields.iter().enumerate() {
-            let (ty, val) = {
-                let mut cx = self.cx();
-                let tele = cx.struct_telescope(d)?;
-                let fty = tele.field_tys[j].clone();
-                if tele.fields[..j].iter().any(|&f| contains_fvar(&fty, f)) {
+            self.add_projection(&name, nparams, j, &field.name, Bk::Exp, &|cx| {
+                cx.struct_telescope(d)
+            })?;
+        }
+        Ok(())
+    }
+
+    /// `N.f := fun params (s : N params) => N.rec (fun _ => T_f) (fun fields => f) s`.
+    /// `last` says how the final binder (the structure or the instance) is supplied.
+    fn add_projection(
+        &mut self,
+        ind: &str,
+        nparams: usize,
+        j: usize,
+        fname: &Ident,
+        last: Bk,
+        mk_tele: &dyn Fn(&mut Cx<'_>) -> R<StructTele>,
+    ) -> R<()> {
+        let (ty, val) = {
+            let mut cx = self.cx();
+            let tele = mk_tele(&mut cx)?;
+            let fty = tele.field_tys[j].clone();
+            if tele.fields[..j].iter().any(|&f| contains_fvar(&fty, f)) {
+                return err(
+                    fname.span,
+                    "fields that depend on earlier fields are not supported yet",
+                );
+            }
+            let self_ty = mk_apps(&cnst(ind.into(), vec![]), &tele.pargs());
+            let s = cx.tc.fresh("self", self_ty.clone(), Mult::Omega);
+            let lvl = from_kernel(cx.tc.check_is_type(&fty), fname.span)?;
+            let t0 = cx.tc.fresh("t", self_ty, Mult::Omega);
+            let motive = cx.tc.mk_lam(&[t0], &fty);
+            let minor = cx.tc.mk_lam(&tele.fields, &fvar(tele.fields[j]));
+            let rec = cnst(format!("{ind}.rec").as_str().into(), vec![lvl]);
+            let mut args = tele.pargs();
+            args.extend([motive, minor, fvar(s)]);
+            let body = mk_apps(&rec, &args);
+            let binders: Vec<u32> = tele.params.iter().copied().chain([s]).collect();
+            (
+                cx.close(&binders, &fty, true, fname.span)?,
+                cx.close(&binders, &body, false, fname.span)?,
+            )
+        };
+        let pname = Ident {
+            name: format!("{ind}.{}", fname.name),
+            span: fname.span,
+        };
+        let mut mask = vec![Bk::Imp; nparams];
+        mask.push(last);
+        self.add_def(&pname, ty, val, mask)
+    }
+
+    // ---- traits and impls ----
+
+    /// A trait becomes a one-constructor structure (the "dictionary") whose
+    /// fields are the methods; each method is a projection that takes the
+    /// instance as an instance-implicit argument.
+    fn elab_trait(&mut self, d: &TraitDecl, span: Span) -> R<()> {
+        let name = d.name.name.clone();
+        if self.env.get(&name).is_some() {
+            return err(d.name.span, format!("`{name}` is already declared"));
+        }
+        for m in &d.fns {
+            if m.generics.iter().any(|g| !g.name.name.starts_with('\'')) {
+                return err(
+                    m.name.span,
+                    "methods with their own generic parameters are not supported yet",
+                );
+            }
+            if m.body.is_some() {
+                return err(m.name.span, "default method bodies are not supported yet");
+            }
+        }
+        let mut gens = vec![Generic {
+            name: Ident {
+                name: "Self".into(),
+                span: d.name.span,
+            },
+            ty: None,
+        }];
+        gens.extend(d.generics.iter().cloned());
+        let nparams = gens
+            .iter()
+            .filter(|g| !g.name.name.starts_with('\''))
+            .count();
+        let ind_ty = self.ind_type(&gens, span)?;
+        let mut scratch = self.env.clone();
+        from_kernel(scratch.add_axiom(&name, &[], ind_ty.clone()), d.name.span)?;
+        let ctor_ty = {
+            let mut cx = Cx::new(&scratch, &self.masks, &self.aliases, &self.tables);
+            let tele = cx.trait_telescope(&gens, d)?;
+            let result = mk_apps(&cnst(name.as_str().into(), vec![]), &tele.pargs());
+            let all: Vec<u32> = tele.params.iter().chain(&tele.fields).copied().collect();
+            cx.close(&all, &result, true, span)?
+        };
+        self.register_inductive(
+            InductiveDecl {
+                name: name.as_str().into(),
+                lparams: vec![],
+                nparams,
+                ty: ind_ty,
+                ctors: vec![(format!("{name}.mk").as_str().into(), ctor_ty)],
+            },
+            nparams,
+            span,
+        )?;
+        for (j, m) in d.fns.iter().enumerate() {
+            self.add_projection(&name, nparams, j, &m.name, Bk::Inst, &|cx| {
+                cx.trait_telescope(&gens, d)
+            })?;
+        }
+        let methods: Vec<String> = d.fns.iter().map(|m| m.name.name.clone()).collect();
+        for m in &methods {
+            self.tables
+                .methods
+                .entry(m.clone())
+                .or_default()
+                .push(name.clone());
+        }
+        self.tables
+            .traits
+            .insert(name, TraitInfo { nparams, methods });
+        Ok(())
+    }
+
+    fn elab_impl(&mut self, d: &ImplDecl, span: Span) -> R<()> {
+        match &d.trait_ref {
+            Some(tr) => self.elab_trait_impl(d, tr, span),
+            None => self.elab_inherent_impl(d, span),
+        }
+    }
+
+    /// `impl<G> Trait<A> for Ty { fn .. }` becomes a definition
+    /// `inst : Π G, Trait Ty A := Trait.mk Ty A (method terms)`.
+    fn elab_trait_impl(&mut self, d: &ImplDecl, tr: &Expr, span: Span) -> R<()> {
+        let (trait_name, ty, val, mask) = {
+            let mut cx = self.cx();
+            let Some((tname, targs)) = cx.trait_ref(tr) else {
+                return err(tr.span, "expected the name of a trait");
+            };
+            let info = self.tables.traits[&tname].clone();
+            let (fvs, mask) = cx.elab_binders(&d.generics, &[])?;
+            let self_ty = cx.elab_type(&d.self_ty)?;
+            cx.scope.push(("Self".into(), self_ty.clone()));
+            let mut class_args = vec![self_ty];
+            for a in targs {
+                class_args.push(cx.elab_type(a)?);
+            }
+            if class_args.len() != info.nparams {
+                return err(
+                    tr.span,
+                    format!(
+                        "trait `{tname}` takes {} type arguments (`Self` included), but {} were given",
+                        info.nparams,
+                        class_args.len()
+                    ),
+                );
+            }
+            let class_app = mk_apps(&cnst(tname.as_str().into(), vec![]), &class_args);
+            let ctor = format!("{tname}.mk");
+            let ctor_ty = from_kernel(self.env.const_type(&ctor, &[]), span)?;
+            let mut cur = from_kernel(cx.tc.instantiate_pis(&ctor_ty, &class_args), span)?;
+            let mut terms = Vec::new();
+            for mname in &info.methods {
+                let w = from_kernel(cx.tc.whnf(&cur), span)?;
+                let Term::Pi(_, dom, body) = &*w else {
+                    return err(span, "internal error: malformed trait structure");
+                };
+                let Some(f) = d.fns.iter().find(|f| f.name.name == *mname) else {
                     return err(
-                        field.name.span,
-                        "struct fields that depend on earlier fields are not supported yet",
+                        span,
+                        format!("missing method `{mname}` in this impl of `{tname}`"),
                     );
+                };
+                let term = cx.elab_method(f, dom)?;
+                cur = instantiate(body, &term);
+                terms.push(term);
+            }
+            if let Some(extra) = d.fns.iter().find(|f| !info.methods.contains(&f.name.name)) {
+                return err(
+                    extra.name.span,
+                    format!("`{}` is not a method of `{tname}`", extra.name.name),
+                );
+            }
+            let mut mk_args = class_args;
+            mk_args.extend(terms);
+            let value = mk_apps(&cnst(ctor.as_str().into(), vec![]), &mk_args);
+            let ty = cx.close(&fvs, &class_app, true, span)?;
+            let val = cx.close(&fvs, &value, false, span)?;
+            (tname, ty, val, mask)
+        };
+        self.check_overlap(&trait_name, &ty, &mask, span)?;
+        self.inst_counter += 1;
+        let name = format!("inst_{trait_name}_{}", self.inst_counter);
+        self.add_def(
+            &Ident {
+                name: name.clone(),
+                span,
+            },
+            ty,
+            val,
+            mask,
+        )?;
+        self.tables.insts.entry(trait_name).or_default().push(name);
+        Ok(())
+    }
+
+    /// Two impls of one trait may not apply to the same type.
+    fn check_overlap(&self, trait_name: &str, ty: &T, mask: &[Bk], span: Span) -> R<()> {
+        let Some(olds) = self.tables.insts.get(trait_name) else {
+            return Ok(());
+        };
+        for old in olds {
+            let mut cx = self.cx();
+            let (_, r_new, _) = cx.open_binders(cnst("new".into(), vec![]), ty.clone(), mask)?;
+            let (_, r_old, _) = cx.open_instance(old)?;
+            if from_kernel(cx.tc.is_def_eq(&r_new, &r_old), span)? {
+                return err(
+                    span,
+                    format!("this impl overlaps with an existing impl of `{trait_name}`"),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// `impl Ty { fn m(..) }` defines `Ty.m`, callable as `x.m(..)`.
+    fn elab_inherent_impl(&mut self, d: &ImplDecl, span: Span) -> R<()> {
+        let head = {
+            let mut cx = self.cx();
+            cx.elab_binders(&d.generics, &[])?;
+            let t = cx.elab_type(&d.self_ty)?;
+            let w = from_kernel(cx.tc.whnf(&t), span)?;
+            let (h, _) = app_spine(&w);
+            match &*h {
+                Term::Const(n, _) => n.to_string(),
+                _ => {
+                    return err(
+                        d.self_ty.span,
+                        "an impl needs a named type, like a struct or an enum",
+                    )
                 }
-                let self_ty = mk_apps(&cnst(name.as_str().into(), vec![]), &tele.pargs());
-                let s = cx.tc.fresh("self", self_ty.clone(), Mult::Omega);
-                let lvl = from_kernel(cx.tc.check_is_type(&fty), field.name.span)?;
-                let t0 = cx.tc.fresh("t", self_ty, Mult::Omega);
-                let motive = cx.tc.mk_lam(&[t0], &fty);
-                let minor = cx.tc.mk_lam(&tele.fields, &fvar(tele.fields[j]));
-                let rec = cnst(format!("{name}.rec").as_str().into(), vec![lvl]);
-                let mut args = tele.pargs();
-                args.extend([motive, minor, fvar(s)]);
-                let body = mk_apps(&rec, &args);
-                let binders: Vec<u32> = tele.params.iter().copied().chain([s]).collect();
-                (
-                    cx.close(&binders, &fty, true, field.name.span)?,
-                    cx.close(&binders, &body, false, field.name.span)?,
-                )
+            }
+        };
+        for f in &d.fns {
+            let mut generics = d.generics.clone();
+            generics.extend(f.generics.iter().cloned());
+            let fd = FnDecl {
+                name: Ident {
+                    name: format!("{head}.{}", f.name.name),
+                    span: f.name.span,
+                },
+                generics,
+                params: f.params.clone(),
+                ret: f.ret.clone(),
+                body: f.body.clone(),
             };
-            let pname = Ident {
-                name: format!("{name}.{}", field.name.name),
-                span: field.name.span,
-            };
-            let mut mask = vec![true; nparams];
-            mask.push(false);
-            self.add_def(&pname, ty, val, mask)?;
+            let (ty, val, mask) = self.try_fn(&fd, span, None, Some(&d.self_ty))?;
+            self.add_def(&fd.name, ty, val, mask)?;
         }
         Ok(())
     }
@@ -387,6 +672,11 @@ struct Cx<'a> {
     env: &'a Env,
     masks: &'a Masks,
     aliases: &'a Aliases,
+    tables: &'a Tables,
+    /// Instance arguments waiting for their types to become known.
+    goals: Vec<(T, Span)>,
+    /// Instance variables in scope (from `T: Trait` bounds).
+    local_insts: Vec<T>,
     scope: Vec<(String, T)>,
     rec: Option<RecCtx>,
     /// Where each metavariable was created, for "cannot infer" errors.
@@ -402,12 +692,15 @@ fn path_name(e: &Expr) -> Option<String> {
 }
 
 impl<'a> Cx<'a> {
-    fn new(env: &'a Env, masks: &'a Masks, aliases: &'a Aliases) -> Self {
+    fn new(env: &'a Env, masks: &'a Masks, aliases: &'a Aliases, tables: &'a Tables) -> Self {
         Cx {
             tc: TypeChecker::new(env),
             env,
             masks,
             aliases,
+            tables,
+            goals: Vec::new(),
+            local_insts: Vec::new(),
             scope: Vec::new(),
             rec: None,
             spans: HashMap::new(),
@@ -441,16 +734,20 @@ impl<'a> Cx<'a> {
     }
 
     /// Introduce generics (implicit, erased when they are types) and parameters.
-    fn elab_binders(&mut self, generics: &[Generic], params: &[Param]) -> R<(Vec<u32>, Vec<bool>)> {
+    fn elab_binders(&mut self, generics: &[Generic], params: &[Param]) -> R<(Vec<u32>, Vec<Bk>)> {
         let mut fvs = Vec::new();
         let mut mask = Vec::new();
         for g in generics {
             if g.name.name.starts_with('\'') {
                 continue; // lifetimes are handled by the borrow checker
             }
-            let ty = match &g.ty {
-                Some(t) => self.elab_type(t)?,
-                None => sort(Level::of_nat(1)),
+            let bounds = match &g.ty {
+                Some(t) => self.bound_list(t)?,
+                None => None,
+            };
+            let ty = match (&g.ty, &bounds) {
+                (Some(t), None) => self.elab_type(t)?,
+                _ => sort(Level::of_nat(1)),
             };
             let mult = if self.is_sort(&ty) {
                 Mult::Zero
@@ -460,7 +757,19 @@ impl<'a> Cx<'a> {
             let id = self.tc.fresh(&g.name.name, ty, mult);
             self.scope.push((g.name.name.clone(), fvar(id)));
             fvs.push(id);
-            mask.push(true);
+            mask.push(Bk::Imp);
+            // `T: Trait` adds a dictionary parameter, found by instance search at call sites
+            for (tn, targs) in bounds.into_iter().flatten() {
+                let mut cargs = vec![fvar(id)];
+                for a in targs {
+                    cargs.push(self.elab_type(a)?);
+                }
+                let cty = mk_apps(&cnst(tn.as_str().into(), vec![]), &cargs);
+                let d = self.tc.fresh("inst", cty, Mult::Omega);
+                fvs.push(d);
+                mask.push(Bk::Inst);
+                self.local_insts.push(fvar(d));
+            }
         }
         for p in params {
             let ty = self.elab_type(&p.ty)?;
@@ -472,7 +781,7 @@ impl<'a> Cx<'a> {
             let id = self.tc.fresh(&p.name.name, ty, mult);
             self.scope.push((p.name.name.clone(), fvar(id)));
             fvs.push(id);
-            mask.push(false);
+            mask.push(Bk::Exp);
         }
         Ok((fvs, mask))
     }
@@ -497,8 +806,10 @@ impl<'a> Cx<'a> {
 
     /// Zonk and abstract `fvs` over `body`; fails if metavariables remain.
     fn close(&mut self, fvs: &[u32], body: &T, is_pi: bool, span: Span) -> R<T> {
+        self.solve_goals(true)?;
         self.tc.zonk_locals();
         let body = self.tc.zonk(body);
+        let body = self.devirt(&body);
         let t = self.tc.mk_binding(fvs, &body, is_pi);
         if let Some(m) = first_mvar(&t) {
             let at = self.spans.get(&m).copied().unwrap_or(span);
@@ -526,7 +837,7 @@ impl<'a> Cx<'a> {
     }
 
     /// A constant applied to fresh universe level metavariables.
-    fn const_term(&mut self, name: &str) -> (T, Vec<bool>) {
+    fn const_term(&mut self, name: &str) -> (T, Vec<Bk>) {
         let n = match self.env.get(name) {
             Some(d) => d.lparams().len(),
             None => 0,
@@ -538,7 +849,7 @@ impl<'a> Cx<'a> {
         )
     }
 
-    fn head_of(&mut self, path: &str) -> Option<(T, Vec<bool>)> {
+    fn head_of(&mut self, path: &str) -> Option<(T, Vec<Bk>)> {
         match path {
             "Type" => return Some((sort(Level::of_nat(1)), vec![])),
             "Prop" => return Some((sort(Level::zero()), vec![])),
@@ -620,14 +931,26 @@ impl<'a> Cx<'a> {
                 Ok(self.new_mvar(ty, e.span))
             }
             ExprKind::Binary(op, l, r) => {
-                let name = match op {
-                    BinOp::Add => "Nat.add",
-                    BinOp::Mul => "Nat.mul",
-                    BinOp::Eq => "Eq",
-                    _ => return err(e.span, "this operator is not supported yet (needs traits)"),
+                // `a + b` is `Add.add(a, b)`, and so on
+                let (name, swap) = match op {
+                    BinOp::Eq => ("Eq", false),
+                    BinOp::Add => ("Add.add", false),
+                    BinOp::Sub => ("Sub.sub", false),
+                    BinOp::Mul => ("Mul.mul", false),
+                    BinOp::EqEq => ("BEq.beq", false),
+                    BinOp::Lt => ("Ord.lt", false),
+                    BinOp::Gt => ("Ord.lt", true),
+                    BinOp::Div => {
+                        return err(e.span, "division is not supported yet");
+                    }
                 };
                 let head = self.const_term(name);
-                self.elab_app(head, vec![Arg::Expr(l), Arg::Expr(r)], exp, e.span)
+                let args = if swap {
+                    vec![Arg::Expr(r), Arg::Expr(l)]
+                } else {
+                    vec![Arg::Expr(l), Arg::Expr(r)]
+                };
+                self.elab_app(head, args, exp, e.span)
             }
             ExprKind::Arrow(a, b) => {
                 let a = self.elab_type(a)?;
@@ -649,10 +972,10 @@ impl<'a> Cx<'a> {
                         return err(f.span, format!("unknown identifier `{n}`"));
                     }
                     None if matches!(f.kind, ExprKind::Field(..)) => {
-                        return err(
-                            f.span,
-                            "method calls are not supported yet (needs traits, M3b)",
-                        );
+                        let ExprKind::Field(base, m) = &f.kind else {
+                            unreachable!()
+                        };
+                        return self.elab_method_call(base, m, args, exp, e.span);
                     }
                     None => (self.elab(f, None)?, vec![]),
                 };
@@ -661,10 +984,8 @@ impl<'a> Cx<'a> {
             ExprKind::Block(b) => self.elab_block(b, exp),
             ExprKind::Do(b) => self.elab_do(b, exp, e.span),
             ExprKind::If(cond, then, els) => self.elab_if(cond, then, els.as_deref(), exp, e.span),
-            ExprKind::Ref { .. } => err(
-                e.span,
-                "references are not supported by the elaborator yet (borrow checker, M5)",
-            ),
+            // references are not tracked yet: `&x` elaborates as `x` (the borrow checker is M5)
+            ExprKind::Ref { inner, .. } => self.elab(inner, exp),
             ExprKind::Match(scrut, arms) => self.elab_match(scrut, arms, exp, e.span),
             ExprKind::Neg(_) => err(e.span, "negation is not supported yet"),
             ExprKind::Str(text) => Ok(str_lit(text)),
@@ -693,7 +1014,7 @@ impl<'a> Cx<'a> {
     /// Apply `head` to `args`, inserting implicit arguments as metavariables.
     fn elab_app(
         &mut self,
-        head: (T, Vec<bool>),
+        head: (T, Vec<Bk>),
         args: Vec<Arg<'_>>,
         exp: Option<&T>,
         span: Span,
@@ -706,17 +1027,21 @@ impl<'a> Cx<'a> {
             let w = from_kernel(self.tc.whnf(&fty), span)?;
             match &*w {
                 Term::Pi(_, d, b) => {
-                    let implicit = mask.get(i).copied().unwrap_or(false);
-                    if !implicit && next >= args.len() {
+                    let kind = mask.get(i).copied().unwrap_or(Bk::Exp);
+                    if kind == Bk::Exp && next >= args.len() {
                         break;
                     }
                     let mv = self.new_mvar(d.clone(), span);
                     term = app(term, mv.clone());
                     fty = instantiate(b, &mv);
                     i += 1;
-                    if !implicit {
-                        pending.push((mv, next));
-                        next += 1;
+                    match kind {
+                        Bk::Exp => {
+                            pending.push((mv, next));
+                            next += 1;
+                        }
+                        Bk::Imp => {}
+                        Bk::Inst => self.goals.push((mv, span)),
                     }
                 }
                 _ => {
@@ -755,7 +1080,350 @@ impl<'a> Cx<'a> {
                 );
             }
         }
+        self.solve_goals(false)?;
         Ok(term)
+    }
+
+    // ---- traits: bounds, instance search, methods ----
+
+    /// `Trait` or `Trait<A, ..>` naming a declared trait.
+    fn trait_ref<'e>(&self, e: &'e Expr) -> Option<(String, &'e [Expr])> {
+        let (head, args): (&Expr, &[Expr]) = match &e.kind {
+            ExprKind::TypeApp(f, args) | ExprKind::Call(f, args) => (f, args.as_slice()),
+            _ => (e, &[]),
+        };
+        let p = path_name(head)?;
+        if self.scope.iter().any(|(n, _)| *n == p) {
+            return None; // a variable shadows the trait name
+        }
+        self.tables.traits.contains_key(&p).then_some((p, args))
+    }
+
+    /// The traits in a bound like `Show + Eq`, or `None` if `e` is an ordinary
+    /// type annotation.
+    fn bound_list<'e>(&self, e: &'e Expr) -> R<Option<Vec<Bound<'e>>>> {
+        let mut parts = Vec::new();
+        flatten_add(e, &mut parts);
+        let refs: Vec<_> = parts.iter().map(|p| self.trait_ref(p)).collect();
+        if refs.iter().all(Option::is_none) {
+            return Ok(None);
+        }
+        if refs.iter().any(Option::is_none) {
+            return err(e.span, "a bound may only mention traits");
+        }
+        Ok(Some(refs.into_iter().flatten().collect()))
+    }
+
+    fn trait_telescope(&mut self, gens: &[Generic], d: &TraitDecl) -> R<StructTele> {
+        let (params, _) = self.elab_binders(gens, &[])?;
+        let mut fields = Vec::new();
+        let mut field_tys = Vec::new();
+        for m in &d.fns {
+            let depth = self.scope.len();
+            let (pf, _) = self.elab_binders(&[], &m.params)?;
+            let ret = match &m.ret {
+                Some(t) => self.elab_type(t)?,
+                None => self.unit_type(),
+            };
+            let fty = self.close(&pf, &ret, true, m.name.span)?;
+            self.scope.truncate(depth);
+            let id = self.tc.fresh(&m.name.name, fty.clone(), Mult::Omega);
+            fields.push(id);
+            field_tys.push(fty);
+        }
+        Ok(StructTele {
+            params,
+            fields,
+            field_tys,
+        })
+    }
+
+    /// Elaborate an impl method as a term of type `expected`.
+    fn elab_method(&mut self, f: &FnDecl, expected: &T) -> R<T> {
+        if f.generics.iter().any(|g| !g.name.name.starts_with('\'')) {
+            return err(
+                f.name.span,
+                "methods with their own generic parameters are not supported yet",
+            );
+        }
+        let Some(block) = &f.body else {
+            return err(f.name.span, "a method in an impl needs a body");
+        };
+        let depth = self.scope.len();
+        let (pf, _) = self.elab_binders(&[], &f.params)?;
+        let ret = match &f.ret {
+            Some(t) => self.elab_type(t)?,
+            None => self.unit_type(),
+        };
+        let body = self.elab_block(block, Some(&ret))?;
+        let body = self.coerce(body, &ret, block.span)?;
+        let ty = self.close(&pf, &ret, true, f.name.span)?;
+        if !from_kernel(self.tc.is_def_eq(&ty, expected), f.name.span)? {
+            return err(
+                f.name.span,
+                format!(
+                    "method `{}` has type `{}`, but the trait requires `{}`",
+                    f.name.name,
+                    self.pp(&ty),
+                    self.pp(expected)
+                ),
+            );
+        }
+        let term = self.close(&pf, &body, false, f.name.span)?;
+        self.scope.truncate(depth);
+        Ok(term)
+    }
+
+    /// Open the leading binders of `fty` (a constant applied to `term` so far)
+    /// as metavariables, returning the instance-binder metavariables separately.
+    fn open_binders(&mut self, mut term: T, mut fty: T, mask: &[Bk]) -> R<(T, T, Vec<T>)> {
+        let mut subgoals = Vec::new();
+        let mut i = 0;
+        loop {
+            let w = from_kernel(self.tc.whnf(&fty), Span::default())?;
+            let Term::Pi(_, d, b) = &*w else {
+                return Ok((term, w, subgoals));
+            };
+            if i >= mask.len() {
+                return Ok((term, w.clone(), subgoals));
+            }
+            let mv = self.new_mvar(d.clone(), Span::default());
+            if mask[i] == Bk::Inst {
+                subgoals.push(mv.clone());
+            }
+            term = app(term, mv.clone());
+            fty = instantiate(b, &mv);
+            i += 1;
+        }
+    }
+
+    fn open_instance(&mut self, name: &str) -> R<(T, T, Vec<T>)> {
+        let (t, mask) = self.const_term(name);
+        let fty = from_kernel(self.tc.infer(&t), Span::default())?;
+        self.open_binders(t, fty, &mask)
+    }
+
+    fn class_of(&self, ty: &T) -> Option<String> {
+        let (h, _) = app_spine(&self.tc.zonk(ty));
+        match &*h {
+            Term::Const(n, _) if self.tables.traits.contains_key(&**n) => Some(n.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Find an instance for the class application `goal`: first the bounds in
+    /// scope, then declared impls (whose own bounds become subgoals).
+    fn synth(&mut self, goal: &T, depth: usize, span: Span) -> R<Option<T>> {
+        if depth > 12 {
+            return Ok(None);
+        }
+        let g = self.tc.zonk(goal);
+        let Some(class) = self.class_of(&g) else {
+            return Ok(None);
+        };
+        for li in self.local_insts.clone() {
+            let lty = from_kernel(self.tc.infer(&li), span)?;
+            let snap = self.tc.snapshot();
+            if from_kernel(self.tc.is_def_eq(&lty, &g), span)? {
+                return Ok(Some(li));
+            }
+            self.tc.restore(snap);
+        }
+        let names = self.tables.insts.get(&class).cloned().unwrap_or_default();
+        for name in names {
+            let snap = self.tc.snapshot();
+            let (term, res, subgoals) = self.open_instance(&name)?;
+            if !from_kernel(self.tc.is_def_eq(&res, &g), span)? {
+                self.tc.restore(snap);
+                continue;
+            }
+            let mut ok = true;
+            for sg in subgoals {
+                let dom = from_kernel(self.tc.infer(&sg), span)?;
+                match self.synth(&dom, depth + 1, span)? {
+                    Some(t) if from_kernel(self.tc.is_def_eq(&sg, &t), span)? => {}
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                return Ok(Some(term));
+            }
+            self.tc.restore(snap);
+        }
+        Ok(None)
+    }
+
+    /// Resolve pending instance arguments. A goal whose type still has
+    /// metavariables is postponed unless `force` is set.
+    fn solve_goals(&mut self, force: bool) -> R<()> {
+        loop {
+            let goals = std::mem::take(&mut self.goals);
+            if goals.is_empty() {
+                return Ok(());
+            }
+            let mut rest = Vec::new();
+            let mut progress = false;
+            for (mv, span) in goals {
+                if !matches!(&*self.tc.zonk(&mv), Term::MVar(_)) {
+                    continue; // already solved by unification
+                }
+                let ty = from_kernel(self.tc.infer(&mv), span)?;
+                let ty = self.tc.zonk(&ty);
+                let stuck = first_mvar(&ty).is_some();
+                // Like Rust, never pick an impl to *determine* a type: a goal whose
+                // type is still unknown stays pending, and is an error at the end.
+                if stuck {
+                    rest.push((mv, span));
+                    continue;
+                }
+                match self.synth(&ty, 0, span)? {
+                    Some(t) => {
+                        from_kernel(self.tc.is_def_eq(&mv, &t), span)?;
+                        progress = true;
+                    }
+                    None if stuck => rest.push((mv, span)),
+                    None => {
+                        return err(
+                            span,
+                            format!("no implementation of `{}` was found", self.pp(&ty)),
+                        )
+                    }
+                }
+            }
+            let done = rest.is_empty();
+            self.goals = rest;
+            if done || !progress {
+                if force && !self.goals.is_empty() {
+                    let (mv, span) = self.goals[0].clone();
+                    let ty = from_kernel(self.tc.infer(&mv), span)?;
+                    return err(
+                        span,
+                        format!(
+                            "cannot tell which implementation of `{}` to use; add a type annotation",
+                            self.pp(&ty)
+                        ),
+                    );
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    fn method_args<'e>(base: &T, args: &'e [Expr]) -> Vec<Arg<'e>> {
+        std::iter::once(Arg::Term(base.clone()))
+            .chain(args.iter().map(Arg::Expr))
+            .collect()
+    }
+
+    /// `base.m(args)`: an inherent method or projection `Ty.m`, or a trait method.
+    fn elab_method_call(
+        &mut self,
+        base: &Expr,
+        m: &Ident,
+        args: &[Expr],
+        exp: Option<&T>,
+        span: Span,
+    ) -> R<T> {
+        let b = self.elab(base, None)?;
+        let b = self.tc.zonk(&b);
+        let bt = from_kernel(self.tc.infer(&b), base.span)?;
+        let bt = self.tc.zonk(&bt);
+        let bt = from_kernel(self.tc.whnf(&bt), base.span)?;
+        // `T.method(args)` with `T` a type: a trait method with `Self := T`
+        if matches!(&*bt, Term::Sort(_)) {
+            let traits = self
+                .tables
+                .methods
+                .get(&m.name)
+                .cloned()
+                .unwrap_or_default();
+            let Some(tn) = traits.first() else {
+                return err(m.span, format!("no method `{}` found", m.name));
+            };
+            let (head, mask) = self.const_term(&format!("{tn}.{}", m.name));
+            let mask = mask.get(1..).map(<[Bk]>::to_vec).unwrap_or_default();
+            let call_args: Vec<Arg> = args.iter().map(Arg::Expr).collect();
+            return self.elab_app((app(head, b), mask), call_args, exp, span);
+        }
+        let (h, _) = app_spine(&bt);
+        if let Term::Const(tn, _) = &*h {
+            let inherent = format!("{tn}.{}", m.name);
+            if matches!(self.env.get(&inherent), Some(Decl::Def { .. })) {
+                let head = self.const_term(&inherent);
+                return self.elab_app(head, Self::method_args(&b, args), exp, span);
+            }
+        }
+        let traits = self
+            .tables
+            .methods
+            .get(&m.name)
+            .cloned()
+            .unwrap_or_default();
+        if traits.is_empty() {
+            return err(
+                m.span,
+                format!("no method `{}` found for type `{}`", m.name, self.pp(&bt)),
+            );
+        }
+        let mut first_err = None;
+        for tn in &traits {
+            let head = self.const_term(&format!("{tn}.{}", m.name));
+            if traits.len() == 1 {
+                return self.elab_app(head, Self::method_args(&b, args), exp, span);
+            }
+            let (snap, ngoals) = (self.tc.snapshot(), self.goals.len());
+            match self.elab_app(head, Self::method_args(&b, args), exp, span) {
+                Ok(t) => return Ok(t),
+                Err(e) => {
+                    self.tc.restore(snap);
+                    self.goals.truncate(ngoals);
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        Err(first_err.expect("at least one candidate trait"))
+    }
+
+    /// Replace `Trait.method Ty inst` by the method's body when `inst` is a
+    /// closed instance, so statically known calls do not pay for the dictionary.
+    fn devirt(&mut self, t: &T) -> T {
+        match &**t {
+            Term::App(..) => {
+                let (f, args) = app_spine(t);
+                let args: Vec<T> = args.iter().map(|a| self.devirt(a)).collect();
+                if let Term::Const(n, _) = &*f {
+                    if let Some((tn, mn)) = n.split_once('.') {
+                        let nparams =
+                            self.tables.traits.get(tn).and_then(|i| {
+                                i.methods.iter().any(|m| m == mn).then_some(i.nparams)
+                            });
+                        if let Some(np) = nparams {
+                            if args.len() > np
+                                && args[..=np].iter().all(|a| !has_bvar(a))
+                                && !has_fvar(&args[np])
+                                && first_mvar(&args[np]).is_none()
+                            {
+                                let head = mk_apps(&f, &args[..=np]);
+                                if let Ok(r) = self.tc.whnf(&head) {
+                                    if r != head {
+                                        let again = head_beta(&mk_apps(&r, &args[np + 1..]));
+                                        return self.devirt(&again);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                mk_apps(&self.devirt(&f), &args)
+            }
+            Term::Lam(m, ty, b) => lam(*m, self.devirt(ty), self.devirt(b)),
+            Term::Pi(m, ty, b) => pi(*m, self.devirt(ty), self.devirt(b)),
+            Term::Let(m, ty, v, b) => let_(*m, self.devirt(ty), self.devirt(v), self.devirt(b)),
+            _ => t.clone(),
+        }
     }
 
     fn elab_block(&mut self, b: &Block, exp: Option<&T>) -> R<T> {
@@ -1325,4 +1993,14 @@ fn mentions_block(b: &Block, name: &str) -> bool {
         Stmt::Bind { action, .. } => mentions_expr(action, name),
         Stmt::Expr(e) => mentions_expr(e, name),
     }) || b.tail.as_ref().is_some_and(|t| mentions_expr(t, name))
+}
+
+fn flatten_add<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match &e.kind {
+        ExprKind::Binary(BinOp::Add, a, b) => {
+            flatten_add(a, out);
+            flatten_add(b, out);
+        }
+        _ => out.push(e),
+    }
 }
