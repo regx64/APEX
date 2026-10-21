@@ -12,3 +12,4 @@ apex-span = { path = "../apex-span" }
 apex-syntax = { path = "../apex-syntax" }
 apex-elab = { path = "../apex-elab" }
 apex-eval = { path = "../apex-eval" }
+apex-kernel = { path = "../apex-kernel" }

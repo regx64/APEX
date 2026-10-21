@@ -33,6 +33,8 @@ pub enum ItemKind {
     Section(Vec<Item>),
     /// `variable (n: Nat);` adds `n` as a leading parameter of every later declaration that mentions it.
     Variable(Vec<Param>),
+    /// `import a.b;`: the module `a/b.apex`, loaded by the driver before this file.
+    Import(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -33,4 +33,8 @@
 - [ ] E-1 core (Nat/Int/List/Array/String/Option/HashMap)  E-2 Mathlib 규모 수학
 
 ## F. 도구와 런타임
-- [ ] F-1 네이티브 백엔드(M7)  F-2 패키지 매니저  F-3 LSP/REPL  F-4 문서 생성  F-5 증분 컴파일
+- [ ] F-1 네이티브 백엔드(M7)
+- [x] F-2 패키지/모듈: `apex.toml`, `import a.b;`(의존성 먼저 로드, 순환 검출), `apex new/build/run/test` (원격 레지스트리·버전 해석은 없음)
+- [x] F-3 REPL: `apex repl` (선언 누적, 식 평가, `:type NAME`). LSP는 아직
+- [x] F-4 문서 생성: `apex doc` (시그니처와 `///` 주석 → Markdown)
+- [ ] F-5 증분 컴파일

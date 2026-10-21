@@ -378,7 +378,12 @@ impl Parser {
             return self.err("`#[simp]` can only be applied to a theorem");
         }
         let word = match self.peek() {
-            T::Ident(w) if matches!(w.as_str(), "namespace" | "open" | "section" | "variable") => {
+            T::Ident(w)
+                if matches!(
+                    w.as_str(),
+                    "namespace" | "open" | "section" | "variable" | "import"
+                ) =>
+            {
                 Some(w.clone())
             }
             _ => None,
@@ -399,6 +404,11 @@ impl Parser {
                     ItemKind::Open(name)
                 }
                 "section" => ItemKind::Section(self.item_block()?),
+                "import" => {
+                    let name = self.dotted_name()?;
+                    self.eat(&T::Semi);
+                    ItemKind::Import(name)
+                }
                 _ => {
                     let params = self.params()?;
                     self.eat(&T::Semi);

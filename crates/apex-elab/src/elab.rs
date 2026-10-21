@@ -512,6 +512,7 @@ impl Elaborator {
                 self.tables.vars.truncate(saved.1);
                 r
             }
+            ItemKind::Import(_) => Ok(()), // loaded by the driver
             ItemKind::Open(name) => {
                 self.tables.opens.push(name.clone());
                 Ok(())

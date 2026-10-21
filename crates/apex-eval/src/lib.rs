@@ -39,3 +39,17 @@ pub fn run_source(path: &str, src: &str) -> Result<String, String> {
         .join()
         .map_err(|_| "the interpreter crashed (stack overflow or internal error)".to_string())?
 }
+
+/// Check and run a project: the files in dependency order, then `main`.
+pub fn run_files(files: &[(String, String)]) -> Result<String, String> {
+    let files = files.to_vec();
+    std::thread::Builder::new()
+        .stack_size(1 << 30)
+        .spawn(move || {
+            let el = apex_elab::check_files(&files)?;
+            run_main(el.env())
+        })
+        .map_err(|e| format!("cannot start interpreter thread: {e}"))?
+        .join()
+        .map_err(|_| "the interpreter crashed (stack overflow or internal error)".to_string())?
+}

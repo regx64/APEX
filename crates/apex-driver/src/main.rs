@@ -1,3 +1,7 @@
+mod doc;
+mod project;
+mod repl;
+
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -38,8 +42,25 @@ fn main() -> ExitCode {
                 Err((String::new(), apex_span::Span::default()))
             }
         }),
+        (Some("doc"), Some(path)) => run(path, |src| match doc::generate(path, src) {
+            Ok(md) => {
+                print!("{md}");
+                Ok(())
+            }
+            Err(msg) => Err((msg, apex_span::Span::default())),
+        }),
+        (Some("repl"), _) => {
+            repl::run();
+            ExitCode::SUCCESS
+        }
+        (Some("new"), Some(name)) => report(project::cmd_new(name)),
+        (Some("build"), dir) => report(project::cmd_build(dir.map_or(".", |s| s.as_str()))),
+        (Some("test"), dir) => report(project::cmd_test(dir.map_or(".", |s| s.as_str()))),
+        (Some("run"), None) => report(project::cmd_run(".")),
         _ => {
-            eprintln!("usage: apex <lex|parse|check|run> <file.apex>");
+            eprintln!(
+                "usage: apex <lex|parse|check|run|doc> <file.apex>\n       apex new <name> | build [dir] | run | test [dir] | repl"
+            );
             ExitCode::from(2)
         }
     }
@@ -59,6 +80,21 @@ fn run(path: &str, f: impl FnOnce(&str) -> Result<(), (String, apex_span::Span)>
             // an empty message means the callee already printed its diagnostic
             if !msg.is_empty() {
                 eprint!("{}", apex_span::render_diagnostic(path, &src, &msg, span));
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn report(r: Result<(), String>) -> ExitCode {
+    match r {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(msg) => {
+            if !msg.is_empty() {
+                eprint!("{msg}");
+                if !msg.ends_with('\n') {
+                    eprintln!();
+                }
             }
             ExitCode::FAILURE
         }
