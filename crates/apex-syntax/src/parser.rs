@@ -446,6 +446,41 @@ impl Parser {
                     continue;
                 }
                 let e = p.expr()?;
+                // `x += e;` and `x = e;` are assignments when the left side is a place
+                let compound = match p.peek() {
+                    T::PlusEq => Some(BinOp::Add),
+                    T::MinusEq => Some(BinOp::Sub),
+                    T::StarEq => Some(BinOp::Mul),
+                    T::SlashEq => Some(BinOp::Div),
+                    T::PercentEq => Some(BinOp::Rem),
+                    _ => None,
+                };
+                if let Some(op) = compound {
+                    if !is_place(&e) {
+                        return p
+                            .err("the left side of an assignment must be a variable or a field");
+                    }
+                    p.bump();
+                    let value = p.expr()?;
+                    p.expect(&T::Semi)?;
+                    stmts.push(Stmt::Assign {
+                        target: e,
+                        op: Some(op),
+                        value,
+                    });
+                    continue;
+                }
+                if let ExprKind::Binary(BinOp::Eq, lhs, rhs) = &e.kind {
+                    if is_place(lhs) && *p.peek() == T::Semi {
+                        p.bump();
+                        stmts.push(Stmt::Assign {
+                            target: (**lhs).clone(),
+                            op: None,
+                            value: (**rhs).clone(),
+                        });
+                        continue;
+                    }
+                }
                 if p.eat(&T::Semi) || (is_block_like(&e) && *p.peek() != T::RBrace) {
                     stmts.push(Stmt::Expr(e));
                 } else if *p.peek() == T::RBrace {
@@ -525,6 +560,14 @@ impl Parser {
                         params,
                         body: Box::new(body),
                     },
+                })
+            }
+            T::Star => {
+                self.bump();
+                let inner = self.expr_bp(10)?;
+                Ok(Expr {
+                    span: start.to(inner.span),
+                    kind: ExprKind::Deref(Box::new(inner)),
                 })
             }
             T::Minus => {
@@ -714,6 +757,15 @@ impl Parser {
     }
 }
 
+/// A variable, a field of a place, or a dereference of one.
+fn is_place(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Var(_) => true,
+        ExprKind::Field(b, _) | ExprKind::Deref(b) => is_place(b),
+        _ => false,
+    }
+}
+
 fn is_block_like(e: &Expr) -> bool {
     matches!(
         e.kind,
@@ -854,5 +906,54 @@ mod loop_and_list_tests {
             panic!()
         };
         assert!(matches!(&init.kind, ExprKind::Lambda { params, .. } if params.is_empty()));
+    }
+}
+
+#[cfg(test)]
+mod assignment_tests {
+    use super::*;
+
+    #[test]
+    fn assignments_and_derefs() {
+        let m = parse("fn f(p: &mut Nat) { let mut x := 1; x = 2; x += 3; *p = x; p.a.b -= 1; }")
+            .unwrap();
+        let ItemKind::Fn(f) = &m.items[0].kind else {
+            panic!()
+        };
+        let st = &f.body.as_ref().unwrap().stmts;
+        assert!(matches!(&st[0], Stmt::Let { mutable: true, .. }));
+        assert!(
+            matches!(&st[1], Stmt::Assign { op: None, target, .. } if matches!(target.kind, ExprKind::Var(_)))
+        );
+        assert!(matches!(
+            &st[2],
+            Stmt::Assign {
+                op: Some(BinOp::Add),
+                ..
+            }
+        ));
+        assert!(
+            matches!(&st[3], Stmt::Assign { target, .. } if matches!(target.kind, ExprKind::Deref(_)))
+        );
+        assert!(
+            matches!(&st[4], Stmt::Assign { op: Some(BinOp::Sub), target, .. } if matches!(target.kind, ExprKind::Field(..)))
+        );
+    }
+
+    #[test]
+    fn equality_is_still_an_expression_outside_statements() {
+        // a proposition is an ordinary expression
+        assert!(parse("theorem t(): 1 = 1 := rfl").is_ok());
+        // `=` after a non-place is not an assignment
+        let m = parse("fn f() -> Nat { g(1) = 2; 3 }").unwrap();
+        let ItemKind::Fn(f) = &m.items[0].kind else {
+            panic!()
+        };
+        assert!(matches!(&f.body.as_ref().unwrap().stmts[0], Stmt::Expr(_)));
+    }
+
+    #[test]
+    fn bad_assignment_target() {
+        assert!(parse("fn f() { 1 += 2; }").is_err());
     }
 }

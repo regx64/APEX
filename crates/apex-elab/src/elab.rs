@@ -46,6 +46,217 @@ enum Bk {
     Inst,
 }
 
+/// Scope entries of `let mut` variables (and `&mut` parameters) carry this prefix.
+const MUT: char = '\u{1}';
+
+fn mut_key(name: &str) -> String {
+    format!("{MUT}{name}")
+}
+
+fn plain_name(n: &str) -> &str {
+    n.strip_prefix(MUT).unwrap_or(n)
+}
+
+// ---- pairs: how mutation is threaded through branches and `&mut` calls ----
+
+fn prod_ty(a: &T, b: &T) -> T {
+    mk_apps(&cnst("Prod".into(), vec![]), &[a.clone(), b.clone()])
+}
+
+fn prod_mk(at: &T, bt: &T, a: T, b: T) -> T {
+    mk_apps(
+        &cnst("Prod.mk".into(), vec![]),
+        &[at.clone(), bt.clone(), a, b],
+    )
+}
+
+fn prod_fst(at: &T, bt: &T, p: T) -> T {
+    mk_apps(
+        &cnst("Prod.fst".into(), vec![]),
+        &[at.clone(), bt.clone(), p],
+    )
+}
+
+fn prod_snd(at: &T, bt: &T, p: T) -> T {
+    mk_apps(
+        &cnst("Prod.snd".into(), vec![]),
+        &[at.clone(), bt.clone(), p],
+    )
+}
+
+/// `A1 × (A2 × (.. × An))`, or `A1` when there is one.
+fn tuple_ty(tys: &[T]) -> T {
+    match tys {
+        [one] => one.clone(),
+        [first, rest @ ..] => prod_ty(first, &tuple_ty(rest)),
+        [] => unreachable!("tuples have at least one component"),
+    }
+}
+
+fn tuple_mk(tys: &[T], vals: &[T]) -> T {
+    match (tys, vals) {
+        ([_], [v]) => v.clone(),
+        ([t, rest_t @ ..], [v, rest_v @ ..]) => {
+            prod_mk(t, &tuple_ty(rest_t), v.clone(), tuple_mk(rest_t, rest_v))
+        }
+        _ => unreachable!("one value per type"),
+    }
+}
+
+/// Component `i` of a tuple built by `tuple_mk`.
+fn tuple_get(tys: &[T], p: T, i: usize) -> T {
+    match tys {
+        [_] => p,
+        [first, rest @ ..] => {
+            if i == 0 {
+                prod_fst(first, &tuple_ty(rest), p)
+            } else {
+                tuple_get(rest, prod_snd(first, &tuple_ty(rest), p), i - 1)
+            }
+        }
+        [] => unreachable!(),
+    }
+}
+
+fn synth_var(name: &str, span: Span) -> Expr {
+    Expr {
+        kind: ExprKind::Var(name.into()),
+        span,
+    }
+}
+
+/// `(w1, (w2, ..))` as syntax: `Prod.mk(w1, Prod.mk(w2, ..))`.
+fn state_tuple_expr(names: &[String], span: Span) -> Expr {
+    match names {
+        [one] => synth_var(one, span),
+        [first, rest @ ..] => Expr {
+            kind: ExprKind::Call(
+                Box::new(synth_var("Prod.mk", span)),
+                vec![synth_var(first, span), state_tuple_expr(rest, span)],
+            ),
+            span,
+        },
+        [] => unreachable!("at least one mutable variable"),
+    }
+}
+
+/// Component `i` of `k` as syntax: `s`, `s.fst`, `s.snd.fst`, ..
+fn state_proj_expr(base: Expr, i: usize, k: usize) -> Expr {
+    let span = base.span;
+    let field = |b: Expr, f: &str| Expr {
+        kind: ExprKind::Field(
+            Box::new(b),
+            Ident {
+                name: f.into(),
+                span,
+            },
+        ),
+        span,
+    };
+    if k == 1 {
+        base
+    } else if i == 0 {
+        field(base, "fst")
+    } else {
+        state_proj_expr(field(base, "snd"), i - 1, k - 1)
+    }
+}
+
+/// `{ stmts; tail }` with the tail turned into a statement and `pure(state)` as the new tail.
+fn block_with_state_tail(b: &Block, names: &[String]) -> Block {
+    let mut stmts = b.stmts.clone();
+    if let Some(t) = &b.tail {
+        stmts.push(Stmt::Expr((**t).clone()));
+    }
+    let pure = Expr {
+        kind: ExprKind::Call(
+            Box::new(synth_var("IO.pure", b.span)),
+            vec![state_tuple_expr(names, b.span)],
+        ),
+        span: b.span,
+    };
+    Block {
+        stmts,
+        tail: Some(Box::new(pure)),
+        span: b.span,
+    }
+}
+
+/// Make every branch of a `do` statement end with `pure(state)`.
+fn add_state_tail(e: &Expr, names: &[String]) -> Expr {
+    let kind = match &e.kind {
+        ExprKind::Block(b) => ExprKind::Block(block_with_state_tail(b, names)),
+        ExprKind::If(c, then, els) => {
+            let empty = Block {
+                stmts: vec![],
+                tail: None,
+                span: e.span,
+            };
+            ExprKind::If(
+                c.clone(),
+                block_with_state_tail(then, names),
+                Some(Box::new(match els {
+                    Some(x) => add_state_tail(x, names),
+                    None => Expr {
+                        kind: ExprKind::Block(block_with_state_tail(&empty, names)),
+                        span: e.span,
+                    },
+                })),
+            )
+        }
+        ExprKind::Match(s, arms) => ExprKind::Match(
+            s.clone(),
+            arms.iter()
+                .map(|a| Arm {
+                    pat: a.pat.clone(),
+                    body: match &a.body.kind {
+                        ExprKind::Block(b) => Expr {
+                            kind: ExprKind::Block(block_with_state_tail(b, names)),
+                            span: a.body.span,
+                        },
+                        _ => {
+                            let single = Block {
+                                stmts: vec![],
+                                tail: Some(Box::new(a.body.clone())),
+                                span: a.body.span,
+                            };
+                            Expr {
+                                kind: ExprKind::Block(block_with_state_tail(&single, names)),
+                                span: a.body.span,
+                            }
+                        }
+                    },
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    };
+    Expr { kind, span: e.span }
+}
+
+/// An assignable place: a mutable variable and a path of struct fields.
+struct Place {
+    name: String,
+    idx: usize,
+    path: Vec<String>,
+}
+
+/// The mutable variables threaded through a branching construct.
+#[derive(Clone)]
+struct StateCtx {
+    /// The type of the construct's own value.
+    r: T,
+    vars: Vec<(String, usize)>,
+    tys: Vec<T>,
+}
+
+#[derive(Clone)]
+struct StructMeta {
+    ctor: String,
+    nparams: usize,
+    fields: Vec<String>,
+}
+
 /// A trait bound: the trait's name and its explicit type arguments.
 type Bound<'e> = (String, &'e [Expr]);
 
@@ -65,6 +276,8 @@ struct Tables {
     /// A user definition that shares a name with a prelude one is stored under a
     /// different kernel name; this maps the source name to it.
     shadow: HashMap<String, String>,
+    /// struct name -> constructor and field names (for field assignment)
+    structs: HashMap<String, StructMeta>,
 }
 
 #[derive(Clone)]
@@ -411,6 +624,14 @@ impl Elaborator {
             nparams,
             span,
         )?;
+        self.tables.structs.insert(
+            name.clone(),
+            StructMeta {
+                ctor: format!("{name}.mk"),
+                nparams,
+                fields: d.fields.iter().map(|f| f.name.name.clone()).collect(),
+            },
+        );
         // projections: S.f := fun params (self : S params) => S.rec (fun _ => T_f) (fun fields => f) self
         for (j, field) in d.fields.iter().enumerate() {
             self.add_projection(&name, nparams, j, &field.name, Bk::Exp, &|cx| {
@@ -821,6 +1042,16 @@ struct Cx<'a> {
     scope: Vec<(String, T)>,
     rec: Option<RecCtx>,
     pending: Option<Pending>,
+    /// Bindings produced by effects (assignments, `&mut` calls) that the enclosing
+    /// binder must wrap around its result.
+    lets: Vec<(u32, T, T)>,
+    /// Set while compiling the arms of a `match` that threads mutable variables.
+    stateful: Option<StateCtx>,
+    /// The next `if`/`match` is a statement of a `do` block: its branches are `do` blocks.
+    do_mode: bool,
+    /// Same, for the arms of the `match` being compiled.
+    leaf_do: bool,
+    synth_counter: usize,
     /// Where each metavariable was created, for "cannot infer" errors.
     spans: HashMap<u32, Span>,
 }
@@ -846,6 +1077,11 @@ impl<'a> Cx<'a> {
             scope: Vec::new(),
             rec: None,
             pending: None,
+            lets: Vec::new(),
+            stateful: None,
+            do_mode: false,
+            leaf_do: false,
+            synth_counter: 0,
             spans: HashMap::new(),
         }
     }
@@ -952,7 +1188,12 @@ impl<'a> Cx<'a> {
     fn close(&mut self, fvs: &[u32], body: &T, is_pi: bool, span: Span) -> R<T> {
         self.solve_goals(true)?;
         self.tc.zonk_locals();
-        let body = self.tc.zonk(body);
+        let body = if is_pi {
+            body.clone()
+        } else {
+            self.wrap_lets(0, body.clone())
+        };
+        let body = self.tc.zonk(&body);
         let body = self.devirt(&body);
         let t = self.tc.mk_binding(fvs, &body, is_pi);
         if let Some(m) = first_mvar(&t) {
@@ -971,8 +1212,8 @@ impl<'a> Cx<'a> {
     // ---- name resolution ----
 
     fn resolve(&self, name: &str) -> Option<Res> {
-        if let Some((_, t)) = self.scope.iter().rev().find(|(n, _)| n == name) {
-            return Some(Res::Local(t.clone()));
+        if let Some(i) = self.lookup_scope(name) {
+            return Some(Res::Local(self.scope[i].1.clone()));
         }
         if let Some(k) = self.tables.shadow.get(name) {
             return Some(Res::Global(k.clone()));
@@ -1127,7 +1368,9 @@ impl<'a> Cx<'a> {
                 };
                 self.elab_app(head, args.iter().map(Arg::Expr).collect(), exp, e.span)
             }
-            ExprKind::Block(b) => self.elab_block(b, exp),
+            ExprKind::Block(b) => self.elab_block_opts(b, exp, true),
+            // references are values: `*r` is `r`
+            ExprKind::Deref(inner) => self.elab(inner, exp),
             ExprKind::Do(b) => self.elab_do(b, exp, e.span),
             ExprKind::For { var, iter, body } => self.elab_for(var, iter, body, e.span),
             ExprKind::Lambda { params, body } => self.elab_lambda(params, body, exp, e.span),
@@ -1629,11 +1872,24 @@ impl<'a> Cx<'a> {
     }
 
     fn elab_block(&mut self, b: &Block, exp: Option<&T>) -> R<T> {
+        self.elab_block_opts(b, exp, false)
+    }
+
+    /// Elaborate a block. Bindings and effects go to `self.lets`; unless `hoist`
+    /// is set they are wrapped around the result here (a hoisted block leaves
+    /// them for the enclosing binder, so that assignments to outer variables
+    /// stay in scope after the block).
+    fn elab_block_opts(&mut self, b: &Block, exp: Option<&T>, hoist: bool) -> R<T> {
         let depth = self.scope.len();
-        let mut lets: Vec<(u32, T, T)> = Vec::new();
+        let mark = self.lets.len();
         for s in &b.stmts {
             match s {
-                Stmt::Let { name, ty, init, .. } => {
+                Stmt::Let {
+                    mutable,
+                    name,
+                    ty,
+                    init,
+                } => {
                     let (val, vty) = match ty {
                         Some(t) => {
                             let t = self.elab_type(t)?;
@@ -1647,18 +1903,26 @@ impl<'a> Cx<'a> {
                     };
                     let vty = self.tc.zonk(&vty);
                     let x = self.tc.fresh(&name.name, vty.clone(), Mult::Omega);
-                    lets.push((x, vty, val));
-                    self.scope.push((name.name.clone(), fvar(x)));
+                    self.lets.push((x, vty, val));
+                    let key = if *mutable {
+                        mut_key(&name.name)
+                    } else {
+                        name.name.clone()
+                    };
+                    self.scope.push((key, fvar(x)));
                 }
                 Stmt::Bind { name, .. } => {
                     return err(name.span, "`<-` is only allowed inside a `do` block");
+                }
+                Stmt::Assign { target, op, value } => {
+                    self.elab_assign(target, *op, value, target.span)?;
                 }
                 Stmt::Expr(e) => {
                     let v = self.elab(e, None)?;
                     let t = from_kernel(self.tc.infer(&v), e.span)?;
                     let t = self.tc.zonk(&t);
                     let x = self.tc.fresh("_", t.clone(), Mult::Omega);
-                    lets.push((x, t, v));
+                    self.lets.push((x, t, v));
                 }
             }
         }
@@ -1672,12 +1936,226 @@ impl<'a> Cx<'a> {
             }
         };
         self.scope.truncate(depth);
-        let mut r = self.tc.zonk(&body);
-        for (x, ty, val) in lets.into_iter().rev() {
+        if hoist {
+            Ok(body)
+        } else {
+            Ok(self.wrap_lets(mark, body))
+        }
+    }
+
+    // ---- mutation as rebinding ----
+
+    fn lookup_scope(&self, name: &str) -> Option<usize> {
+        self.scope.iter().rposition(|(n, _)| plain_name(n) == name)
+    }
+
+    /// Wrap the bindings accumulated since `mark` around `t`.
+    fn wrap_lets(&mut self, mark: usize, t: T) -> T {
+        let mine = self.lets.split_off(mark);
+        let mut r = self.tc.zonk(&t);
+        for (x, ty, val) in mine.into_iter().rev() {
             let (ty, val) = (self.tc.zonk(&ty), self.tc.zonk(&val));
             r = let_(Mult::Omega, ty, val, abstract_fvars(&r, &[x]));
         }
-        Ok(r)
+        r
+    }
+
+    /// Run `f` and wrap the bindings it produced around its result.
+    fn scoped(&mut self, f: impl FnOnce(&mut Self) -> R<T>) -> R<T> {
+        let mark = self.lets.len();
+        let v = f(self)?;
+        Ok(self.wrap_lets(mark, v))
+    }
+
+    /// The mutable variables in scope (the latest binding of each name).
+    fn state_vars(&self) -> Vec<(String, usize)> {
+        let mut out = Vec::new();
+        for (i, (n, _)) in self.scope.iter().enumerate() {
+            if n.starts_with(MUT) && self.lookup_scope(plain_name(n)) == Some(i) {
+                out.push((plain_name(n).to_string(), i));
+            }
+        }
+        out
+    }
+
+    fn state_terms(&self, vars: &[(String, usize)]) -> Vec<T> {
+        vars.iter().map(|(_, i)| self.scope[*i].1.clone()).collect()
+    }
+
+    fn state_types(&mut self, vars: &[(String, usize)]) -> R<Vec<T>> {
+        let mut tys = Vec::new();
+        for t in self.state_terms(vars) {
+            let ty = from_kernel(self.tc.infer(&t), Span::default())?;
+            tys.push(self.tc.zonk(&ty));
+        }
+        Ok(tys)
+    }
+
+    fn restore_state(&mut self, vars: &[(String, usize)], terms: &[T]) {
+        for ((_, i), t) in vars.iter().zip(terms) {
+            self.scope[*i].1 = t.clone();
+        }
+    }
+
+    /// `(v, state)`: a branch's value together with the mutable variables as it leaves them.
+    fn state_pair(&mut self, st: &StateCtx, v: T) -> T {
+        let cur = self.state_terms(&st.vars);
+        prod_mk(&st.r, &tuple_ty(&st.tys), v, tuple_mk(&st.tys, &cur))
+    }
+
+    /// After a construct that returned `(value, state)`: bind it, rebind every
+    /// mutable variable to its component, and give back the value.
+    fn rebind_state(&mut self, st: &StateCtx, pair_ty: &T, pair: T) -> T {
+        let p = self.tc.fresh("branch", pair_ty.clone(), Mult::Omega);
+        self.lets.push((p, pair_ty.clone(), pair));
+        let s_ty = tuple_ty(&st.tys);
+        let snd = prod_snd(&st.r, &s_ty, fvar(p));
+        for (i, (name, idx)) in st.vars.iter().enumerate() {
+            let x2 = self.tc.fresh(name, st.tys[i].clone(), Mult::Omega);
+            self.lets
+                .push((x2, st.tys[i].clone(), tuple_get(&st.tys, snd.clone(), i)));
+            self.scope[*idx].1 = fvar(x2);
+        }
+        prod_fst(&st.r, &s_ty, fvar(p))
+    }
+
+    /// Make the mutable variables read-only: closures and loop bodies capture them by value.
+    fn freeze_mutables(&mut self) -> Vec<(usize, String)> {
+        let mut saved = Vec::new();
+        for (i, (n, _)) in self.scope.iter_mut().enumerate() {
+            if n.starts_with(MUT) {
+                saved.push((i, n.clone()));
+                *n = plain_name(n).to_string();
+            }
+        }
+        saved
+    }
+
+    fn unfreeze_mutables(&mut self, saved: Vec<(usize, String)>) {
+        for (i, n) in saved {
+            if i < self.scope.len() {
+                self.scope[i].0 = n;
+            }
+        }
+    }
+
+    fn resolve_place(&mut self, e: &Expr, purpose: &str) -> R<Place> {
+        match &e.kind {
+            ExprKind::Var(n) => {
+                let Some(idx) = self.lookup_scope(n) else {
+                    return err(e.span, format!("unknown identifier `{n}`"));
+                };
+                if !self.scope[idx].0.starts_with(MUT) {
+                    return err(
+                        e.span,
+                        format!(
+                            "cannot {purpose} `{n}`, which is not declared `mut` (write `let mut {n} := ..`; closures and loop bodies capture variables by value)"
+                        ),
+                    );
+                }
+                Ok(Place {
+                    name: n.clone(),
+                    idx,
+                    path: vec![],
+                })
+            }
+            ExprKind::Field(b, f) => {
+                let mut p = self.resolve_place(b, purpose)?;
+                p.path.push(f.name.clone());
+                Ok(p)
+            }
+            ExprKind::Deref(b) => self.resolve_place(b, purpose),
+            _ => err(e.span, "this expression is not a place"),
+        }
+    }
+
+    /// The struct behind `cur`: its metadata, type arguments and name.
+    fn struct_of(&mut self, cur: &T, field: &str, span: Span) -> R<(StructMeta, Vec<T>, String)> {
+        let ty = from_kernel(self.tc.infer(cur), span)?;
+        let ty = self.tc.zonk(&ty);
+        let ty = from_kernel(self.tc.whnf(&ty), span)?;
+        let (h, args) = app_spine(&ty);
+        let Term::Const(n, _) = &*h else {
+            return err(span, format!("`{}` has no field `{field}`", self.pp(&ty)));
+        };
+        let Some(meta) = self.tables.structs.get(&**n).cloned() else {
+            return err(
+                span,
+                format!("`{n}` is not a struct, so it has no field `{field}`"),
+            );
+        };
+        if !meta.fields.iter().any(|f| f == field) {
+            return err(span, format!("struct `{n}` has no field `{field}`"));
+        }
+        let params = args[..meta.nparams].to_vec();
+        Ok((meta, params, n.to_string()))
+    }
+
+    fn project(&mut self, cur: &T, field: &str, span: Span) -> R<T> {
+        let (_, params, sname) = self.struct_of(cur, field, span)?;
+        let mut args = params;
+        args.push(cur.clone());
+        Ok(mk_apps(
+            &cnst(format!("{sname}.{field}").as_str().into(), vec![]),
+            &args,
+        ))
+    }
+
+    /// `cur` with the field path replaced by `newval` (nested struct update).
+    fn update_path(&mut self, cur: &T, path: &[String], newval: &T, span: Span) -> R<T> {
+        let Some((f, rest)) = path.split_first() else {
+            return Ok(newval.clone());
+        };
+        let (meta, params, _) = self.struct_of(cur, f, span)?;
+        let inner_cur = self.project(cur, f, span)?;
+        let inner_new = self.update_path(&inner_cur, rest, newval, span)?;
+        let mut args = params;
+        for k in &meta.fields {
+            args.push(if k == f {
+                inner_new.clone()
+            } else {
+                self.project(cur, k, span)?
+            });
+        }
+        Ok(mk_apps(&cnst(meta.ctor.as_str().into(), vec![]), &args))
+    }
+
+    fn read_place(&mut self, p: &Place, span: Span) -> R<(T, T)> {
+        let mut cur = self.scope[p.idx].1.clone();
+        for f in &p.path {
+            cur = self.project(&cur, f, span)?;
+        }
+        let ty = from_kernel(self.tc.infer(&cur), span)?;
+        Ok((cur, self.tc.zonk(&ty)))
+    }
+
+    /// `place := newval`: a fresh binding that the variable then refers to.
+    fn assign_place(&mut self, p: &Place, newval: T, span: Span) -> R<()> {
+        let cur_root = self.scope[p.idx].1.clone();
+        let root_ty = from_kernel(self.tc.infer(&cur_root), span)?;
+        let root_ty = self.tc.zonk(&root_ty);
+        let new_root = self.update_path(&cur_root, &p.path, &newval, span)?;
+        let nt = from_kernel(self.tc.infer(&new_root), span)?;
+        self.coerce_eq(&nt, &root_ty, span)?;
+        let x2 = self.tc.fresh(&p.name, root_ty.clone(), Mult::Omega);
+        self.lets.push((x2, root_ty, new_root));
+        self.scope[p.idx].1 = fvar(x2);
+        Ok(())
+    }
+
+    /// `x = e`, `x.f = e`, `*p = e`, and `x op= e`.
+    fn elab_assign(&mut self, target: &Expr, op: Option<BinOp>, value: &Expr, span: Span) -> R<()> {
+        let place = self.resolve_place(target, "assign to")?;
+        let (_, ty) = self.read_place(&place, span)?;
+        let rhs = match op {
+            Some(o) => Expr {
+                kind: ExprKind::Binary(o, Box::new(target.clone()), Box::new(value.clone())),
+                span,
+            },
+            None => value.clone(),
+        };
+        let v = self.elab_check(&rhs, &ty)?;
+        self.assign_place(&place, v, span)
     }
 
     // ---- do notation ----
@@ -1733,23 +2211,23 @@ impl<'a> Cx<'a> {
     }
 
     fn do_stmts(&mut self, stmts: &[Stmt], tail: Option<&Expr>, r: &T, span: Span) -> R<T> {
-        let bind = |this: &mut Self, a: &T, act: T, k: T| -> T {
-            let _ = this;
+        let bind = |a: &T, act: T, k: T| -> T {
             mk_apps(
                 &cnst("IO.bind".into(), vec![]),
                 &[a.clone(), r.clone(), act, k],
             )
         };
-        match stmts.split_first() {
+        let mark = self.lets.len();
+        let result = match stmts.split_first() {
             None => match tail {
-                Some(t) => self.elab_check(t, &self.io_type(r)),
+                Some(t) => {
+                    let io = self.io_type(r);
+                    self.elab_action(t, &io)?
+                }
                 None => {
                     let unit = self.unit_type();
                     self.coerce_eq(r, &unit, span)?;
-                    Ok(mk_apps(
-                        &cnst("IO.pure".into(), vec![]),
-                        &[unit, self.unit_value()],
-                    ))
+                    mk_apps(&cnst("IO.pure".into(), vec![]), &[unit, self.unit_value()])
                 }
             },
             Some((Stmt::Bind { name, ty, action }, rest)) => {
@@ -1757,25 +2235,73 @@ impl<'a> Cx<'a> {
                     Some(t) => self.elab_type(t)?,
                     None => self.fresh_type(action.span),
                 };
-                let act = self.elab_check(action, &self.io_type(&a))?;
+                let io = self.io_type(&a);
+                let act = self.elab_action(action, &io)?;
                 let a = self.tc.zonk(&a);
                 let x = self.tc.fresh(&name.name, a.clone(), Mult::Omega);
                 self.scope.push((name.name.clone(), fvar(x)));
                 let body = self.do_stmts(rest, tail, r, span);
                 self.scope.pop();
                 let lam = self.close_lam(x, &body?);
-                Ok(bind(self, &a, act, lam))
+                bind(&a, act, lam)
+            }
+            Some((Stmt::Expr(e), rest))
+                if matches!(
+                    e.kind,
+                    ExprKind::If(..) | ExprKind::Match(..) | ExprKind::Block(_)
+                ) && !self.state_vars().is_empty() =>
+            {
+                // `if c { A } else { B }; rest` with mutable variables `w..` in scope:
+                //   let s <- if c { A; pure((w..)) } else { B; pure((w..)) };  w.. = s..;  rest
+                let names: Vec<String> = self.state_vars().into_iter().map(|(n, _)| n).collect();
+                self.synth_counter += 1;
+                let sname = format!("__state{}", self.synth_counter);
+                let sp = e.span;
+                let var = |n: &str| Expr {
+                    kind: ExprKind::Var(n.into()),
+                    span: sp,
+                };
+                let mut new = vec![Stmt::Bind {
+                    name: Ident {
+                        name: sname.clone(),
+                        span: sp,
+                    },
+                    ty: None,
+                    action: add_state_tail(e, &names),
+                }];
+                for (i, n) in names.iter().enumerate() {
+                    new.push(Stmt::Assign {
+                        target: var(n),
+                        op: None,
+                        value: state_proj_expr(var(&sname), i, names.len()),
+                    });
+                }
+                new.extend(rest.iter().cloned());
+                return self.do_stmts(&new, tail, r, span);
             }
             Some((Stmt::Expr(e), rest)) => {
                 let a = self.fresh_type(e.span);
-                let act = self.elab_check(e, &self.io_type(&a))?;
+                let io = self.io_type(&a);
+                let act = self.elab_action(e, &io)?;
                 let a = self.tc.zonk(&a);
                 let x = self.tc.fresh("_", a.clone(), Mult::Omega);
                 let body = self.do_stmts(rest, tail, r, span)?;
                 let lam = self.close_lam(x, &body);
-                Ok(bind(self, &a, act, lam))
+                bind(&a, act, lam)
             }
-            Some((Stmt::Let { name, ty, init, .. }, rest)) => {
+            Some((Stmt::Assign { target, op, value }, rest)) => {
+                self.elab_assign(target, *op, value, target.span)?;
+                self.do_stmts(rest, tail, r, span)?
+            }
+            Some((
+                Stmt::Let {
+                    mutable,
+                    name,
+                    ty,
+                    init,
+                },
+                rest,
+            )) => {
                 let (val, vty) = match ty {
                     Some(t) => {
                         let t = self.elab_type(t)?;
@@ -1789,13 +2315,38 @@ impl<'a> Cx<'a> {
                 };
                 let vty = self.tc.zonk(&vty);
                 let x = self.tc.fresh(&name.name, vty.clone(), Mult::Omega);
-                self.scope.push((name.name.clone(), fvar(x)));
+                let key = if *mutable {
+                    mut_key(&name.name)
+                } else {
+                    name.name.clone()
+                };
+                self.scope.push((key, fvar(x)));
                 let body = self.do_stmts(rest, tail, r, span);
                 self.scope.pop();
                 let body = self.tc.zonk(&body?);
                 let val = self.tc.zonk(&val);
-                Ok(let_(Mult::Omega, vty, val, abstract_fvars(&body, &[x])))
+                let_(Mult::Omega, vty, val, abstract_fvars(&body, &[x]))
             }
+        };
+        // effects of this statement scope over the statements after it
+        Ok(self.wrap_lets(mark, result))
+    }
+
+    /// A statement of a `do` block: blocks, `if` and `match` branch into `do` blocks.
+    fn elab_action(&mut self, e: &Expr, io: &T) -> R<T> {
+        match &e.kind {
+            ExprKind::Block(b) => {
+                let t = self.elab_do(b, Some(io), e.span)?;
+                self.coerce(t, io, e.span)
+            }
+            ExprKind::If(..) | ExprKind::Match(..) => {
+                self.do_mode = true;
+                let r = self.elab(e, Some(io));
+                self.do_mode = false;
+                let t = r?;
+                self.coerce(t, io, e.span)
+            }
+            _ => self.elab_check(e, io),
         }
     }
 
@@ -1809,6 +2360,7 @@ impl<'a> Cx<'a> {
         span: Span,
     ) -> R<T> {
         let (depth, nlocal) = (self.scope.len(), self.local_insts.len());
+        let frozen = self.freeze_mutables();
         let mut xs = Vec::new();
         let mut expected = exp.cloned();
         for p in params {
@@ -1842,12 +2394,13 @@ impl<'a> Cx<'a> {
             xs.push(x);
             expected = from_exp.map(|(_, _, b)| instantiate(&b, &fvar(x)));
         }
-        let b = match &expected {
-            Some(t) => self.elab_check(body, t),
-            None => self.elab(body, None),
-        };
+        let b = self.scoped(|cx| match &expected {
+            Some(t) => cx.elab_check(body, t),
+            None => cx.elab(body, None),
+        });
         self.scope.truncate(depth);
         self.local_insts.truncate(nlocal);
+        self.unfreeze_mutables(frozen);
         let b = b?;
         let _ = span;
         self.tc.zonk_locals();
@@ -1875,10 +2428,12 @@ impl<'a> Cx<'a> {
             }
         };
         let x = self.tc.fresh(&var.name, elem.clone(), Mult::Omega);
+        let frozen = self.freeze_mutables();
         self.scope.push((var.name.clone(), fvar(x)));
         let unit_io = self.io_type(&self.unit_type());
         let b = self.elab_do(body, Some(&unit_io), span);
         self.scope.pop();
+        self.unfreeze_mutables(frozen);
         let lam = self.close_lam(x, &b?);
         Ok(mk_apps(&cnst("for_each".into(), vec![]), &[elem, it, lam]))
     }
@@ -1941,6 +2496,7 @@ impl<'a> Cx<'a> {
     }
 
     fn elab_match(&mut self, scrut: &Expr, arms: &[Arm], exp: Option<&T>, span: Span) -> R<T> {
+        let do_mode = std::mem::take(&mut self.do_mode);
         let ret = match exp {
             Some(t) => t.clone(),
             None => {
@@ -1977,19 +2533,49 @@ impl<'a> Cx<'a> {
             }
             _ => false,
         };
-        let r = self.compile_match(vec![x], rows, &ret, top, span);
+        // mutable variables in scope are threaded through the arms as a pair
+        // (not in a `do` statement: `do_stmts` threads them through the action instead)
+        let vars = if do_mode {
+            Vec::new()
+        } else {
+            self.state_vars()
+        };
+        let st = if vars.is_empty() {
+            None
+        } else {
+            let tys = self.state_types(&vars)?;
+            Some(StateCtx {
+                r: ret.clone(),
+                vars: vars.clone(),
+                tys,
+            })
+        };
+        let target_ty = match &st {
+            Some(st) => prod_ty(&ret, &tuple_ty(&st.tys)),
+            None => ret.clone(),
+        };
+        let saved_state = self.stateful.take();
+        let saved_leaf_do = std::mem::replace(&mut self.leaf_do, do_mode);
+        self.stateful = st.clone();
+        let r = self.compile_match(vec![x], rows, &target_ty, top, span);
+        self.stateful = saved_state;
+        self.leaf_do = saved_leaf_do;
         if top {
             if let Some(rc) = &mut self.rec {
                 rc.in_top = false;
             }
         }
         let r = r?;
-        Ok(match wrap {
+        let r = match wrap {
             None => r,
             Some((ty, val)) => {
                 let r = self.tc.zonk(&r);
                 let_(Mult::Omega, ty, val, abstract_fvars(&r, &[x]))
             }
+        };
+        Ok(match st {
+            Some(st) => self.rebind_state(&st, &target_ty, r),
+            None => r,
         })
     }
 
@@ -2016,7 +2602,34 @@ impl<'a> Cx<'a> {
                     self.scope.push((n.clone(), fvar(c)));
                 }
             }
-            let r = self.elab_check(first.body, ret);
+            let leaf_do = self.leaf_do;
+            let arm = |cx: &mut Self, ty: &T| -> R<T> {
+                if leaf_do {
+                    cx.elab_action(first.body, ty)
+                } else {
+                    cx.elab_check(first.body, ty)
+                }
+            };
+            let r = match self.stateful.take() {
+                Some(st) => {
+                    let saved = self.state_terms(&st.vars);
+                    let res = self.scoped(|cx| {
+                        let v = arm(cx, &st.r)?;
+                        Ok(cx.state_pair(&st, v))
+                    });
+                    self.restore_state(&st.vars, &saved);
+                    self.stateful = Some(st);
+                    res
+                }
+                None => {
+                    // arms must not see each other's assignments
+                    let vars = self.state_vars();
+                    let saved = self.state_terms(&vars);
+                    let res = self.scoped(|cx| arm(cx, ret));
+                    self.restore_state(&vars, &saved);
+                    res
+                }
+            };
             self.scope.truncate(depth);
             return r;
         };
@@ -2233,24 +2846,101 @@ impl<'a> Cx<'a> {
         exp: Option<&T>,
         span: Span,
     ) -> R<T> {
+        let do_mode = std::mem::take(&mut self.do_mode);
         let bool_ty = cnst("Bool".into(), vec![]);
         let c = self.elab_check(cond, &bool_ty)?;
-        let then_t = self.elab_block(then, exp)?;
-        let ty = match exp {
+        let vars = self.state_vars();
+        let then_branch = |cx: &mut Self, r: Option<&T>| -> R<T> {
+            if do_mode {
+                let io = r.cloned().expect("a `do` branch has an expected type");
+                cx.elab_do(then, Some(&io), then.span)
+            } else {
+                cx.elab_block_opts(then, r, true)
+            }
+        };
+        let else_branch = |cx: &mut Self, e: &Expr, r: &T| -> R<T> {
+            if do_mode {
+                cx.elab_action(e, r)
+            } else {
+                cx.elab_check(e, r)
+            }
+        };
+        if vars.is_empty() || do_mode {
+            // (in a `do` statement the variables were already threaded through the
+            // branches by the desugaring in `do_stmts`; here they are only restored)
+            let saved = self.state_terms(&vars);
+            let then_t = self.scoped(|cx| then_branch(cx, exp))?;
+            self.restore_state(&vars, &saved);
+            let ty = match exp {
+                Some(t) => t.clone(),
+                None => from_kernel(self.tc.infer(&then_t), then.span)?,
+            };
+            let then_t = self.coerce(then_t, &ty, then.span)?;
+            let else_t = match els {
+                Some(e) => self.scoped(|cx| else_branch(cx, e, &ty))?,
+                None => {
+                    let u = self.unit_branch(&ty, do_mode);
+                    self.coerce(u, &ty, span)?
+                }
+            };
+            self.restore_state(&vars, &saved);
+            return self.build_if(c, &ty, then_t, else_t, span);
+        }
+        // mutable variables are in scope: each branch returns its value together
+        // with the variables as it leaves them, and they are rebound afterwards
+        let r = match exp {
             Some(t) => t.clone(),
-            None => from_kernel(self.tc.infer(&then_t), then.span)?,
+            None => self.fresh_type(span),
         };
-        let then_t = self.coerce(then_t, &ty, then.span)?;
-        let else_t = match els {
-            Some(e) => self.elab_check(e, &ty)?,
-            None => self.coerce(self.unit_value(), &ty, span)?,
+        let tys = self.state_types(&vars)?;
+        let st = StateCtx {
+            r: r.clone(),
+            vars: vars.clone(),
+            tys: tys.clone(),
         };
-        let ty = self.tc.zonk(&ty);
+        let saved = self.state_terms(&vars);
+        let then_t = self.scoped(|cx| {
+            let v = then_branch(cx, Some(&st.r))?;
+            let v = cx.coerce(v, &st.r, then.span)?;
+            Ok(cx.state_pair(&st, v))
+        })?;
+        self.restore_state(&vars, &saved);
+        let else_t = self.scoped(|cx| {
+            let v = match els {
+                Some(e) => else_branch(cx, e, &st.r)?,
+                None => {
+                    let u = cx.unit_branch(&st.r, do_mode);
+                    cx.coerce(u, &st.r, span)?
+                }
+            };
+            Ok(cx.state_pair(&st, v))
+        })?;
+        self.restore_state(&vars, &saved);
+        let pair_ty = prod_ty(&r, &tuple_ty(&tys));
+        let pair = self.build_if(c, &pair_ty, then_t, else_t, span)?;
+        Ok(self.rebind_state(&st, &pair_ty, pair))
+    }
+
+    /// The value of an omitted `else`: `()`, or `pure(())` in a `do` block.
+    fn unit_branch(&self, _ty: &T, do_mode: bool) -> T {
+        if do_mode {
+            mk_apps(
+                &cnst("IO.pure".into(), vec![]),
+                &[self.unit_type(), self.unit_value()],
+            )
+        } else {
+            self.unit_value()
+        }
+    }
+
+    /// `Bool.rec (fun _ => ty) else_case then_case c`
+    fn build_if(&mut self, c: T, ty: &T, then_t: T, else_t: T, span: Span) -> R<T> {
+        let bool_ty = cnst("Bool".into(), vec![]);
+        let ty = self.tc.zonk(ty);
         let lvl = from_kernel(self.tc.check_is_type(&ty), span)?;
         let lvl = self.tc.zonk_level(&lvl);
         let motive = lam(Mult::Omega, bool_ty, ty);
         let rec = cnst("Bool.rec".into(), vec![lvl]);
-        // Bool.rec motive (false case) (true case) major
         Ok(mk_apps(&rec, &[motive, else_t, then_t, c]))
     }
 }
@@ -2259,7 +2949,7 @@ fn mentions_expr(e: &Expr, name: &str) -> bool {
     match &e.kind {
         ExprKind::Var(n) => n == name,
         ExprKind::Nat(_) | ExprKind::Str(_) | ExprKind::Wild | ExprKind::Unit => false,
-        ExprKind::Neg(a) => mentions_expr(a, name),
+        ExprKind::Neg(a) | ExprKind::Deref(a) => mentions_expr(a, name),
         ExprKind::Binary(_, a, b) | ExprKind::Arrow(a, b) => {
             mentions_expr(a, name) || mentions_expr(b, name)
         }
@@ -2287,6 +2977,9 @@ fn mentions_block(b: &Block, name: &str) -> bool {
     b.stmts.iter().any(|s| match s {
         Stmt::Let { init, .. } => mentions_expr(init, name),
         Stmt::Bind { action, .. } => mentions_expr(action, name),
+        Stmt::Assign { target, value, .. } => {
+            mentions_expr(target, name) || mentions_expr(value, name)
+        }
         Stmt::Expr(e) => mentions_expr(e, name),
     }) || b.tail.as_ref().is_some_and(|t| mentions_expr(t, name))
 }

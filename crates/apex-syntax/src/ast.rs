@@ -139,6 +139,12 @@ pub enum Stmt {
         ty: Option<Expr>,
         action: Expr,
     },
+    /// `place = value;` or `place op= value;`
+    Assign {
+        target: Expr,
+        op: Option<BinOp>,
+        value: Expr,
+    },
     Expr(Expr),
 }
 
@@ -183,6 +189,8 @@ pub enum ExprKind {
     Wild,
     Unit,
     Neg(Box<Expr>),
+    /// `*e`: dereference (a no-op for value-semantic references).
+    Deref(Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Ref {
         mutable: bool,

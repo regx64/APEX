@@ -1,5 +1,9 @@
 // Surface-level prelude, elaborated at startup.
 
+/// Pairs. The compiler threads `&mut` arguments and variables assigned in branches through
+/// `Prod`: a call returns `(result, updated arguments)`.
+struct Prod<A, B> { fst: A, snd: B }
+
 theorem rfl<A: Type, a: A>(): a = a := Eq.refl(a)
 
 fn println(s: String) -> IO<Unit> {
