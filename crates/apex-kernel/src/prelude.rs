@@ -155,5 +155,43 @@ pub fn add_prelude(env: &mut Env) -> KResult<()> {
             ),
         ],
     })?;
+    add_io(env)?;
+    Ok(())
+}
+
+/// `String`, `IO` and their primitive operations. These are axioms for the
+/// kernel (they never compute there); the interpreter gives them meaning.
+fn add_io(env: &mut Env) -> KResult<()> {
+    let io = |a: Raw| app_(c("IO"), vec![a]);
+    env.add_axiom("String", &[], type_().build()?)?;
+    env.add_axiom(
+        "String.append",
+        &[],
+        arrow(c("String"), arrow(c("String"), c("String"))).build()?,
+    )?;
+    env.add_axiom("Nat.toString", &[], arrow(c("Nat"), c("String")).build()?)?;
+    env.add_axiom("IO", &[], arrow(type_(), type_()).build()?)?;
+    env.add_axiom(
+        "IO.pure",
+        &[],
+        pi_m(Mult::Zero, "α", type_(), arrow(v("α"), io(v("α")))).build()?,
+    )?;
+    env.add_axiom(
+        "IO.bind",
+        &[],
+        pi_m(
+            Mult::Zero,
+            "α",
+            type_(),
+            pi_m(
+                Mult::Zero,
+                "β",
+                type_(),
+                arrow(io(v("α")), arrow(arrow(v("α"), io(v("β"))), io(v("β")))),
+            ),
+        )
+        .build()?,
+    )?;
+    env.add_axiom("IO.print", &[], arrow(c("String"), io(c("Unit"))).build()?)?;
     Ok(())
 }

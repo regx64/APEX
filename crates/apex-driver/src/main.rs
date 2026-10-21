@@ -27,7 +27,7 @@ fn main() -> ExitCode {
         }),
         (Some("run"), Some(path)) => run(path, |src| match apex_eval::run_source(path, src) {
             Ok(out) => {
-                println!("{out}");
+                print!("{out}");
                 Ok(())
             }
             Err(rendered) => {

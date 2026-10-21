@@ -61,9 +61,13 @@ impl Elaborator {
         let mut masks = Masks::new();
         masks.insert("Eq".into(), vec![true, false, false]);
         masks.insert("Eq.refl".into(), vec![true, false]);
+        masks.insert("IO.pure".into(), vec![true, false]);
+        masks.insert("IO.bind".into(), vec![true, true, false, false]);
         let mut aliases = Aliases::new();
         aliases.insert("true".into(), "Bool.true".into());
         aliases.insert("false".into(), "Bool.false".into());
+        aliases.insert("print".into(), "IO.print".into());
+        aliases.insert("pure".into(), "IO.pure".into());
         let mut el = Elaborator {
             env,
             masks,
@@ -515,10 +519,10 @@ impl<'a> Cx<'a> {
         if let Some((_, t)) = self.scope.iter().rev().find(|(n, _)| n == name) {
             return Some(Res::Local(t.clone()));
         }
-        if let Some(full) = self.aliases.get(name) {
-            return Some(Res::Global(full.clone()));
+        if self.env.get(name).is_some() {
+            return Some(Res::Global(name.to_string()));
         }
-        self.env.get(name).map(|_| Res::Global(name.to_string()))
+        self.aliases.get(name).map(|full| Res::Global(full.clone()))
     }
 
     /// A constant applied to fresh universe level metavariables.
@@ -655,6 +659,7 @@ impl<'a> Cx<'a> {
                 self.elab_app(head, args.iter().map(Arg::Expr).collect(), exp, e.span)
             }
             ExprKind::Block(b) => self.elab_block(b, exp),
+            ExprKind::Do(b) => self.elab_do(b, exp, e.span),
             ExprKind::If(cond, then, els) => self.elab_if(cond, then, els.as_deref(), exp, e.span),
             ExprKind::Ref { .. } => err(
                 e.span,
@@ -662,7 +667,7 @@ impl<'a> Cx<'a> {
             ),
             ExprKind::Match(scrut, arms) => self.elab_match(scrut, arms, exp, e.span),
             ExprKind::Neg(_) => err(e.span, "negation is not supported yet"),
-            ExprKind::Str(_) => err(e.span, "string literals are not supported yet"),
+            ExprKind::Str(text) => Ok(str_lit(text)),
         }
     }
 
@@ -775,6 +780,9 @@ impl<'a> Cx<'a> {
                     lets.push((x, vty, val));
                     self.scope.push((name.name.clone(), fvar(x)));
                 }
+                Stmt::Bind { name, .. } => {
+                    return err(name.span, "`<-` is only allowed inside a `do` block");
+                }
                 Stmt::Expr(e) => {
                     let v = self.elab(e, None)?;
                     let t = from_kernel(self.tc.infer(&v), e.span)?;
@@ -800,6 +808,138 @@ impl<'a> Cx<'a> {
             r = let_(Mult::Omega, ty, val, abstract_fvars(&r, &[x]));
         }
         Ok(r)
+    }
+
+    // ---- do notation ----
+
+    fn io_type(&self, a: &T) -> T {
+        app(cnst("IO".into(), vec![]), a.clone())
+    }
+
+    fn elab_do(&mut self, b: &Block, exp: Option<&T>, span: Span) -> R<T> {
+        let r = match exp {
+            Some(t) => {
+                let w = from_kernel(self.tc.whnf(t), span)?;
+                match &*w {
+                    Term::App(f, a) if matches!(&**f, Term::Const(n, _) if &**n == "IO") => {
+                        a.clone()
+                    }
+                    Term::MVar(_) => {
+                        let l = self.tc.new_level_mvar();
+                        let sort_mv = self.new_mvar(sort(l), span);
+                        let r = self.new_mvar(sort_mv, span);
+                        self.coerce_eq(&w, &self.io_type(&r), span)?;
+                        r
+                    }
+                    _ => {
+                        return err(
+                            span,
+                            format!(
+                                "a `do` block has type `IO _`, but `{}` is expected here",
+                                self.pp(t)
+                            ),
+                        )
+                    }
+                }
+            }
+            None => {
+                let l = self.tc.new_level_mvar();
+                let sort_mv = self.new_mvar(sort(l), span);
+                self.new_mvar(sort_mv, span)
+            }
+        };
+        self.do_stmts(&b.stmts, b.tail.as_deref(), &r, span)
+    }
+
+    fn coerce_eq(&mut self, a: &T, b: &T, span: Span) -> R<()> {
+        if from_kernel(self.tc.is_def_eq(a, b), span)? {
+            Ok(())
+        } else {
+            err(
+                span,
+                format!("type mismatch: `{}` vs `{}`", self.pp(a), self.pp(b)),
+            )
+        }
+    }
+
+    fn do_stmts(&mut self, stmts: &[Stmt], tail: Option<&Expr>, r: &T, span: Span) -> R<T> {
+        let bind = |this: &mut Self, a: &T, act: T, k: T| -> T {
+            let _ = this;
+            mk_apps(
+                &cnst("IO.bind".into(), vec![]),
+                &[a.clone(), r.clone(), act, k],
+            )
+        };
+        match stmts.split_first() {
+            None => match tail {
+                Some(t) => self.elab_check(t, &self.io_type(r)),
+                None => {
+                    let unit = self.unit_type();
+                    self.coerce_eq(r, &unit, span)?;
+                    Ok(mk_apps(
+                        &cnst("IO.pure".into(), vec![]),
+                        &[unit, self.unit_value()],
+                    ))
+                }
+            },
+            Some((Stmt::Bind { name, ty, action }, rest)) => {
+                let a = match ty {
+                    Some(t) => self.elab_type(t)?,
+                    None => self.fresh_type(action.span),
+                };
+                let act = self.elab_check(action, &self.io_type(&a))?;
+                let a = self.tc.zonk(&a);
+                let x = self.tc.fresh(&name.name, a.clone(), Mult::Omega);
+                self.scope.push((name.name.clone(), fvar(x)));
+                let body = self.do_stmts(rest, tail, r, span);
+                self.scope.pop();
+                let lam = self.close_lam(x, &body?);
+                Ok(bind(self, &a, act, lam))
+            }
+            Some((Stmt::Expr(e), rest)) => {
+                let a = self.fresh_type(e.span);
+                let act = self.elab_check(e, &self.io_type(&a))?;
+                let a = self.tc.zonk(&a);
+                let x = self.tc.fresh("_", a.clone(), Mult::Omega);
+                let body = self.do_stmts(rest, tail, r, span)?;
+                let lam = self.close_lam(x, &body);
+                Ok(bind(self, &a, act, lam))
+            }
+            Some((Stmt::Let { name, ty, init, .. }, rest)) => {
+                let (val, vty) = match ty {
+                    Some(t) => {
+                        let t = self.elab_type(t)?;
+                        (self.elab_check(init, &t)?, t)
+                    }
+                    None => {
+                        let v = self.elab(init, None)?;
+                        let t = from_kernel(self.tc.infer(&v), init.span)?;
+                        (v, t)
+                    }
+                };
+                let vty = self.tc.zonk(&vty);
+                let x = self.tc.fresh(&name.name, vty.clone(), Mult::Omega);
+                self.scope.push((name.name.clone(), fvar(x)));
+                let body = self.do_stmts(rest, tail, r, span);
+                self.scope.pop();
+                let body = self.tc.zonk(&body?);
+                let val = self.tc.zonk(&val);
+                Ok(let_(Mult::Omega, vty, val, abstract_fvars(&body, &[x])))
+            }
+        }
+    }
+
+    fn fresh_type(&mut self, span: Span) -> T {
+        let l = self.tc.new_level_mvar();
+        let s = self.new_mvar(sort(l), span);
+        self.new_mvar(s, span)
+    }
+
+    /// `fun x => body` with `x` a local variable.
+    fn close_lam(&mut self, x: u32, body: &T) -> T {
+        self.tc.zonk_locals();
+        let body = self.tc.zonk(body);
+        self.tc.mk_lam(&[x], &body)
     }
 
     // ---- pattern matching ----
@@ -1167,7 +1307,7 @@ fn mentions_expr(e: &Expr, name: &str) -> bool {
             mentions_expr(f, name) || args.iter().any(|a| mentions_expr(a, name))
         }
         ExprKind::Field(b, _) => mentions_expr(b, name),
-        ExprKind::Block(b) => mentions_block(b, name),
+        ExprKind::Block(b) | ExprKind::Do(b) => mentions_block(b, name),
         ExprKind::If(c, t, e) => {
             mentions_expr(c, name)
                 || mentions_block(t, name)
@@ -1182,6 +1322,7 @@ fn mentions_expr(e: &Expr, name: &str) -> bool {
 fn mentions_block(b: &Block, name: &str) -> bool {
     b.stmts.iter().any(|s| match s {
         Stmt::Let { init, .. } => mentions_expr(init, name),
+        Stmt::Bind { action, .. } => mentions_expr(action, name),
         Stmt::Expr(e) => mentions_expr(e, name),
     }) || b.tail.as_ref().is_some_and(|t| mentions_expr(t, name))
 }

@@ -18,14 +18,18 @@ fn programs_print_expected_output() {
     assert!(paths.len() >= 5);
     for p in paths {
         let src = fs::read_to_string(&p).unwrap();
-        let want = src
+        // expected output: the consecutive `// out: ` lines at the top
+        let want: Vec<&str> = src
             .lines()
-            .next()
-            .unwrap()
-            .strip_prefix("// out: ")
-            .expect("missing `// out:` header");
+            .map_while(|l| l.strip_prefix("// out: "))
+            .collect();
+        assert!(
+            !want.is_empty(),
+            "{}: missing `// out:` header",
+            p.display()
+        );
         match apex_eval::run_source(&p.display().to_string(), &src) {
-            Ok(got) => assert_eq!(got, want, "{}", p.display()),
+            Ok(got) => assert_eq!(got.trim_end(), want.join("\n"), "{}", p.display()),
             Err(e) => panic!("{} failed:\n{e}", p.display()),
         }
     }

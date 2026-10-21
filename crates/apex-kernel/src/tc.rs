@@ -100,7 +100,7 @@ impl<'a> TypeChecker<'a> {
             Term::Lam(m, ty, b) => lam(*m, self.zonk(ty), self.zonk(b)),
             Term::Pi(m, ty, b) => pi(*m, self.zonk(ty), self.zonk(b)),
             Term::Let(m, ty, v, b) => let_(*m, self.zonk(ty), self.zonk(v), self.zonk(b)),
-            Term::BVar(_) | Term::FVar(_) | Term::Lit(_) => t.clone(),
+            Term::BVar(_) | Term::FVar(_) | Term::Lit(_) | Term::Str(_) => t.clone(),
         }
     }
 
@@ -310,6 +310,7 @@ impl<'a> TypeChecker<'a> {
             Term::FVar(id) => self.local_ty(*id),
             Term::Sort(l) => Ok(sort(l.clone().succ())),
             Term::Lit(_) => Ok(cnst("Nat".into(), vec![])),
+            Term::Str(_) => Ok(cnst("String".into(), vec![])),
             Term::Const(n, ls) => self.env.const_type(n, ls),
             Term::App(f, a) => {
                 let tf = self.infer(f)?;
@@ -669,7 +670,8 @@ impl<'a> TypeChecker<'a> {
             | Term::Sort(_)
             | Term::Pi(..)
             | Term::Const(..)
-            | Term::Lit(_) => Ok(Mult::Zero),
+            | Term::Lit(_)
+            | Term::Str(_) => Ok(Mult::Zero),
             Term::App(f, a) => {
                 let uf = self.usage(f, x)?;
                 let tf = self.infer(f)?;

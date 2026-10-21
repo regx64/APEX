@@ -133,6 +133,12 @@ pub enum Stmt {
         ty: Option<Expr>,
         init: Expr,
     },
+    /// `let x <- action;` (only meaningful inside `do`).
+    Bind {
+        name: Ident,
+        ty: Option<Expr>,
+        action: Expr,
+    },
     Expr(Expr),
 }
 
@@ -183,6 +189,8 @@ pub enum ExprKind {
     TypeApp(Box<Expr>, Vec<Expr>),
     Field(Box<Expr>, Ident),
     Block(Block),
+    /// `do { .. }`: a sequence of monadic actions.
+    Do(Block),
     If(Box<Expr>, Block, Option<Box<Expr>>),
     Match(Box<Expr>, Vec<Arm>),
 }

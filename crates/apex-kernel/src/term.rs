@@ -47,6 +47,8 @@ pub enum Term {
     Const(Name, Vec<Level>),
     /// A natural number literal; definitionally `Nat.zero` / `Nat.succ (Lit (n-1))`.
     Lit(u64),
+    /// A string literal, of type `String`.
+    Str(Name),
     App(T, T),
     Lam(Mult, T, T),
     Pi(Mult, T, T),
@@ -71,6 +73,9 @@ pub fn cnst(n: Name, ls: Vec<Level>) -> T {
 }
 pub fn lit(n: u64) -> T {
     Rc::new(Term::Lit(n))
+}
+pub fn str_lit(s: &str) -> T {
+    Rc::new(Term::Str(s.into()))
 }
 pub fn app(f: T, a: T) -> T {
     Rc::new(Term::App(f, a))
@@ -117,7 +122,12 @@ fn inst_at(t: &T, val: &T, d: u32) -> T {
                 t.clone()
             }
         }
-        Term::FVar(_) | Term::MVar(_) | Term::Sort(_) | Term::Const(..) | Term::Lit(_) => t.clone(),
+        Term::FVar(_)
+        | Term::MVar(_)
+        | Term::Sort(_)
+        | Term::Const(..)
+        | Term::Lit(_)
+        | Term::Str(_) => t.clone(),
         Term::App(f, a) => app(inst_at(f, val, d), inst_at(a, val, d)),
         Term::Lam(m, ty, b) => lam(*m, inst_at(ty, val, d), inst_at(b, val, d + 1)),
         Term::Pi(m, ty, b) => pi(*m, inst_at(ty, val, d), inst_at(b, val, d + 1)),
@@ -145,7 +155,12 @@ fn abs_at(t: &T, fvars: &[u32], d: u32) -> T {
             Some(j) => bvar(d + (fvars.len() - 1 - j) as u32),
             None => t.clone(),
         },
-        Term::BVar(_) | Term::MVar(_) | Term::Sort(_) | Term::Const(..) | Term::Lit(_) => t.clone(),
+        Term::BVar(_)
+        | Term::MVar(_)
+        | Term::Sort(_)
+        | Term::Const(..)
+        | Term::Lit(_)
+        | Term::Str(_) => t.clone(),
         Term::App(f, a) => app(abs_at(f, fvars, d), abs_at(a, fvars, d)),
         Term::Lam(m, ty, b) => lam(*m, abs_at(ty, fvars, d), abs_at(b, fvars, d + 1)),
         Term::Pi(m, ty, b) => pi(*m, abs_at(ty, fvars, d), abs_at(b, fvars, d + 1)),
@@ -214,7 +229,7 @@ pub fn instantiate_levels(t: &T, params: &[Name], ls: &[Level]) -> T {
             instantiate_levels(v, params, ls),
             instantiate_levels(b, params, ls),
         ),
-        Term::BVar(_) | Term::FVar(_) | Term::MVar(_) | Term::Lit(_) => t.clone(),
+        Term::BVar(_) | Term::FVar(_) | Term::MVar(_) | Term::Lit(_) | Term::Str(_) => t.clone(),
     }
 }
 
@@ -235,7 +250,7 @@ pub fn collect_level_params(t: &T, out: &mut Vec<Name>) {
             collect_level_params(v, out);
             collect_level_params(b, out);
         }
-        Term::BVar(_) | Term::FVar(_) | Term::MVar(_) | Term::Lit(_) => {}
+        Term::BVar(_) | Term::FVar(_) | Term::MVar(_) | Term::Lit(_) | Term::Str(_) => {}
     }
 }
 
@@ -308,6 +323,7 @@ pub fn fmt_term(t: &T, names: &dyn Fn(u32) -> String) -> String {
         Term::FVar(i) => names(*i),
         Term::MVar(i) => format!("?m{i}"),
         Term::Lit(n) => n.to_string(),
+        Term::Str(s) => format!("{s:?}"),
         Term::Sort(l) => {
             if l.is_zero() {
                 "Prop".into()

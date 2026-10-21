@@ -35,6 +35,9 @@ Prop의 inductive는 subsingleton(생성자 0개 또는 필드가 모두 Prop/�
 ## Nat 리터럴 (M4에서 추가)
 `Term::Lit(u64)`는 `Nat.zero`/`Nat.succ`와 정의적으로 같다. `Nat.add`/`Nat.mul`은 리터럴끼리 직접 계산한다.
 
+## 문자열과 IO (M4b에서 추가)
+`Term::Str`는 `String` 타입의 리터럴. `String`, `IO`, `IO.pure/bind/print`는 공리로 선언돼 커널은 계산하지 않는다.
+
 ## 알려진 한계 (다음 단계에서 해결)
 - recursor의 바인더는 모두 ω. 선형 필드를 가진 타입의 선형 `match`는 엘라보레이터(M3)/MIR(M5)에서 검사한다.
 - 상호/중첩 inductive, 구조체 프로젝션/η, 자연수 리터럴, K-규칙 없음.

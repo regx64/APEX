@@ -17,6 +17,7 @@ pub enum Ir {
     Global(Rc<str>),
     Erased,
     Nat(u128),
+    Str(Rc<str>),
     /// `let` binding: value, then body (which sees the new variable at index 0).
     Let(Rc<Ir>, Rc<Ir>),
 }
@@ -65,6 +66,7 @@ impl<'a> Eraser<'a> {
             },
             Term::Const(n, _) => Ir::Global(n.clone()),
             Term::Lit(n) => Ir::Nat(*n as u128),
+            Term::Str(s) => Ir::Str(s.clone()),
             Term::App(f, a) => {
                 let tf = self.tc.infer(f).map_err(|e| e.0)?;
                 let tf = self.tc.whnf(&tf).map_err(|e| e.0)?;

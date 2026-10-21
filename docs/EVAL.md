@@ -1,4 +1,4 @@
-# APEX 실행 (M4)
+# APEX 실행 (M4, M4b)
 
 `crates/apex-eval`: 검사를 통과한 커널 선언을 소거하고 실행한다. `apex run file.apex`는 파일을 검사한 뒤
 `fn main()`의 값을 평가해 출력한다.
@@ -26,7 +26,22 @@ call-by-need 환경 기계. 지연 평가가 필요한 이유: 정의가 recurso
 10만 단계 재귀 `sum_to`가 약 0.35초. 한 단계에 recursor 규칙 적용과 thunk 할당이 여러 번 일어난다.
 recursor 패턴을 직접 재귀/루프로 되돌리는 최적화와 네이티브 코드는 M7.
 
+## 문자열과 IO (M4b)
+- `String`은 커널 공리 타입이고 `Term::Str`가 리터럴이다. 커널은 문자열을 계산하지 않는다 (구조적 동치만).
+- `IO α`도 커널에서는 **불투명한 공리 타입**이다: `IO`, `IO.pure`, `IO.bind`, `IO.print`.
+  그래서 커널은 순수하게 유지되고, 부수효과는 타입으로만 드러난다 (`IO` 없이는 출력할 수 없다).
+- 런타임에서 IO 값은 액션(`Pure` / `Bind` / `Print`)이고, `run_io`가 명시적 continuation 스택으로 실행한다.
+  그래서 5만 번 도는 `do` 루프도 Rust 스택을 쓰지 않는다.
+- 표면 문법: `do { let x <- act; stmt; let y := e; tail }`.
+  `let x <- e; rest` → `IO.bind e (fun x => rest)`, `e; rest` → `IO.bind e (fun _ => rest)`,
+  마지막 식이 없으면 `pure(())`. `<-`는 `do` 밖에서 오류.
+- 내장: `print(s)`, `println(s)`(prelude.apex에 표면 언어로 정의), `pure(x)`, `String.append`, `Nat.toString`.
+- `fn main() -> IO<Unit>`이면 실행하고 출력을 돌려주며, 그 외의 `main`은 값을 출력한다.
+
 ## 한계
-- 입출력이 없다: `main`의 값만 출력한다. 문자열과 `IO`는 다음 단계 (M4b).
+- 출력은 프로그램이 끝난 뒤 한꺼번에 나온다 (버퍼). 입력(`stdin`), 파일, 예외가 없다.
+- `do`는 `IO`에만 동작한다. 일반 모나드는 트레잇(M3c) 이후.
+- `let mut`과 변수 갱신, `for`/`while` 루프가 없다 (재귀로 쓴다).
+- 문자열 연산은 `append`/`toString`뿐이고 `++`, 보간, 문자는 없다.
 - 값 표시는 구조체 생성자 `S.mk`를 `S(..)`로, 그 외는 생성자 이름으로 보여 준다.
 - 소거는 타입체커에 의존하므로 신뢰 영역은 아니지만, 소거 오류는 실행 결과를 틀리게 만들 수 있다.

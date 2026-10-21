@@ -24,6 +24,7 @@ pub enum TokenKind {
     For,
     If,
     Else,
+    Do,
     // punctuation
     LParen,
     RParen,
@@ -36,6 +37,8 @@ pub enum TokenKind {
     Colon,
     ColonEq,
     Arrow,
+    /// `<-`, binding the result of an action inside `do`.
+    LArrow,
     FatArrow,
     Amp,
     Plus,
@@ -82,6 +85,7 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "for" => For,
         "if" => If,
         "else" => Else,
+        "do" => Do,
         "_" => Underscore,
         _ => return None,
     })
@@ -204,6 +208,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             let (k, n) = match (c, two) {
                 (b':', Some(b'=')) => (ColonEq, 2),
                 (b'-', Some(b'>')) => (Arrow, 2),
+                (b'<', Some(b'-')) => (LArrow, 2),
                 (b'=', Some(b'>')) => (FatArrow, 2),
                 (b'=', Some(b'=')) => (EqEq, 2),
                 (b'(', _) => (LParen, 1),
@@ -272,6 +277,7 @@ impl std::fmt::Display for TokenKind {
             For => "`for`",
             If => "`if`",
             Else => "`else`",
+            Do => "`do`",
             LParen => "`(`",
             RParen => "`)`",
             LBrace => "`{`",
@@ -283,6 +289,7 @@ impl std::fmt::Display for TokenKind {
             Colon => "`:`",
             ColonEq => "`:=`",
             Arrow => "`->`",
+            LArrow => "`<-`",
             FatArrow => "`=>`",
             Amp => "`&`",
             Plus => "`+`",

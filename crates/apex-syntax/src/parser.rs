@@ -428,6 +428,12 @@ impl Parser {
                     } else {
                         None
                     };
+                    if p.eat(&T::LArrow) {
+                        let action = p.expr()?;
+                        p.expect(&T::Semi)?;
+                        stmts.push(Stmt::Bind { name, ty, action });
+                        continue;
+                    }
                     p.expect(&T::ColonEq)?;
                     let init = p.expr()?;
                     p.expect(&T::Semi)?;
@@ -611,6 +617,10 @@ impl Parser {
                 }
             }
             T::LBrace => ExprKind::Block(self.block()?),
+            T::Do => {
+                self.bump();
+                ExprKind::Do(self.block()?)
+            }
             T::If => {
                 self.bump();
                 let cond = self.expr()?;

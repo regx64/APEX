@@ -7,14 +7,22 @@ pub use eval::Evaluator;
 
 use apex_kernel::Env;
 
-/// Evaluate the global `main` and render its value.
+/// Evaluate the global `main`. If it is an `IO` action, run it and return what
+/// it printed; otherwise render its value. The result ends with a newline.
 pub fn run_main(env: &Env) -> Result<String, String> {
-    if env.get("main").is_none() {
+    let Some(decl) = env.get("main") else {
         return Err("no `main` function: define `fn main() -> T { .. }`".into());
-    }
+    };
+    let (head, _) = apex_kernel::term::app_spine(decl.ty());
+    let is_io = matches!(&*head, apex_kernel::Term::Const(n, _) if &**n == "IO");
     let ev = Evaluator::new(env);
     let v = ev.global("main")?;
-    ev.show(&v)
+    if is_io {
+        ev.run_io(v)?;
+        Ok(ev.take_output())
+    } else {
+        Ok(format!("{}\n", ev.show(&v)?))
+    }
 }
 
 /// Check and run a source file. Runs on a thread with a large stack because

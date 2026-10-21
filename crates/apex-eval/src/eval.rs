@@ -52,6 +52,8 @@ enum Kind {
     NatSucc,
     NatAdd,
     NatMul,
+    /// String and IO primitives, dispatched by name.
+    Prim,
 }
 
 pub struct FunInfo {
@@ -63,6 +65,9 @@ pub struct FunInfo {
 #[derive(Clone)]
 pub enum Value {
     Nat(u128),
+    Str(Rc<str>),
+    /// An `IO` action; running it performs the effects.
+    Io(Rc<IoAct>),
     Ctor(Rc<str>, Rc<Vec<Value>>),
     Closure(Rc<Ir>, EnvList),
     Fun(Rc<FunInfo>, Rc<Vec<Value>>),
@@ -70,8 +75,15 @@ pub enum Value {
     Thunk(Rc<RefCell<Th>>),
 }
 
+pub enum IoAct {
+    Pure(Value),
+    Bind(Value, Value),
+    Print(Value),
+}
+
 pub struct Evaluator<'a> {
     env: &'a Env,
+    out: RefCell<String>,
     globals: RefCell<HashMap<String, Value>>,
     rules: RefCell<HashMap<String, Value>>,
 }
@@ -80,6 +92,7 @@ impl<'a> Evaluator<'a> {
     pub fn new(env: &'a Env) -> Self {
         Evaluator {
             env,
+            out: RefCell::default(),
             globals: RefCell::default(),
             rules: RefCell::default(),
         }
@@ -108,6 +121,7 @@ impl<'a> Evaluator<'a> {
         Ok(match &**ir {
             Ir::Erased => Value::Erased,
             Ir::Nat(n) => Value::Nat(*n),
+            Ir::Str(t) => Value::Str(t.clone()),
             Ir::Var(i) => lookup(env, *i)?,
             Ir::Lam(b) => Value::Closure(b.clone(), env.clone()),
             _ => Value::Thunk(Rc::new(RefCell::new(Th::Pending(ir.clone(), env.clone())))),
@@ -126,6 +140,7 @@ impl<'a> Evaluator<'a> {
             Ir::Global(n) => self.global(n),
             Ir::Erased => Ok(Value::Erased),
             Ir::Nat(n) => Ok(Value::Nat(*n)),
+            Ir::Str(t) => Ok(Value::Str(t.clone())),
             Ir::Let(v, b) => {
                 let vv = self.delay(v, env)?;
                 self.eval(b, &cons(vv, env))
@@ -157,6 +172,50 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    fn force_str(&self, v: &Value) -> R<Rc<str>> {
+        match self.force(v)? {
+            Value::Str(s) => Ok(s),
+            _ => Err("internal error: expected a string".into()),
+        }
+    }
+
+    /// Run an `IO` action to completion, appending its output to the buffer.
+    /// Continuations live on an explicit stack so long `do` chains and loops
+    /// do not grow the Rust stack.
+    pub fn run_io(&self, action: Value) -> R<Value> {
+        let mut conts: Vec<Value> = Vec::new();
+        let mut cur = self.force(&action)?;
+        loop {
+            let Value::Io(act) = &cur else {
+                return Err("internal error: expected an IO action".into());
+            };
+            let result = match &**act {
+                IoAct::Bind(m, k) => {
+                    conts.push(k.clone());
+                    cur = self.force(m)?;
+                    continue;
+                }
+                IoAct::Pure(v) => v.clone(),
+                IoAct::Print(s) => {
+                    let text = self.force_str(s)?;
+                    self.out.borrow_mut().push_str(&text);
+                    Value::Ctor("Unit.unit".into(), Rc::new(vec![]))
+                }
+            };
+            match conts.pop() {
+                None => return Ok(result),
+                Some(k) => {
+                    let next = self.apply(k, result)?;
+                    cur = self.force(&next)?;
+                }
+            }
+        }
+    }
+
+    pub fn take_output(&self) -> String {
+        std::mem::take(&mut *self.out.borrow_mut())
+    }
+
     fn exec(&self, info: &FunInfo, args: Vec<Value>) -> R<Value> {
         match info.kind {
             Kind::Ctor => Ok(Value::Ctor(info.name.clone(), Rc::new(args))),
@@ -179,6 +238,21 @@ impl<'a> Evaluator<'a> {
                     .ok_or_else(|| "Nat overflow".to_string())
             }
             Kind::Rec => self.exec_rec(&info.name, args),
+            Kind::Prim => match &*info.name {
+                "String.append" => {
+                    let (a, b) = (self.force_str(&args[0])?, self.force_str(&args[1])?);
+                    Ok(Value::Str(format!("{a}{b}").into()))
+                }
+                "Nat.toString" => Ok(Value::Str(self.force_nat(&args[0])?.to_string().into())),
+                // IO.pure α x / IO.bind α β m k / IO.print s
+                "IO.pure" => Ok(Value::Io(Rc::new(IoAct::Pure(args[1].clone())))),
+                "IO.bind" => Ok(Value::Io(Rc::new(IoAct::Bind(
+                    args[2].clone(),
+                    args[3].clone(),
+                )))),
+                "IO.print" => Ok(Value::Io(Rc::new(IoAct::Print(args[0].clone())))),
+                other => Err(format!("internal error: unknown primitive `{other}`")),
+            },
         }
     }
 
@@ -266,6 +340,11 @@ impl<'a> Evaluator<'a> {
             "Nat.succ" => fun(Kind::NatSucc, 1),
             "Nat.add" => fun(Kind::NatAdd, 2),
             "Nat.mul" => fun(Kind::NatMul, 2),
+            "String.append" => fun(Kind::Prim, 2),
+            "Nat.toString" => fun(Kind::Prim, 1),
+            "IO.pure" => fun(Kind::Prim, 2),
+            "IO.bind" => fun(Kind::Prim, 4),
+            "IO.print" => fun(Kind::Prim, 1),
             _ => match self.env.get(name) {
                 Some(Decl::Def { val, .. }) => {
                     let ir = Eraser::new(self.env).erase_closed(val)?;
@@ -298,6 +377,8 @@ impl<'a> Evaluator<'a> {
         match self.force(v)? {
             Value::Nat(n) => Ok(n.to_string()),
             Value::Erased => Ok("_".into()),
+            Value::Str(t) => Ok(format!("{t:?}")),
+            Value::Io(_) => Ok("<io action>".into()),
             Value::Closure(..) | Value::Fun(..) => Ok("<function>".into()),
             Value::Thunk(_) => unreachable!("force returns a value"),
             Value::Ctor(name, args) => {
