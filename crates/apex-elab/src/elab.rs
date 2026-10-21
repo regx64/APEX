@@ -33,7 +33,7 @@ enum Arg<'e> {
 }
 
 enum Res {
-    Local(u32),
+    Local(T),
     Global(String),
 }
 
@@ -110,25 +110,82 @@ impl Elaborator {
     }
 
     fn elab_fn(&mut self, f: &FnDecl, span: Span) -> R<()> {
-        let (ty, val, mask) = {
-            let mut cx = self.cx();
-            let (fvs, mask) = cx.elab_binders(&f.generics, &f.params)?;
-            let ret = match &f.ret {
-                Some(t) => cx.elab_type(t)?,
-                None => cx.unit_type(),
-            };
-            let Some(block) = &f.body else {
-                return err(f.name.span, "a function needs a body");
-            };
-            let body = cx.elab_block(block, Some(&ret))?;
-            let body = cx.coerce(body, &ret, block.span)?;
-            (
-                cx.close(&fvs, &ret, true, span)?,
-                cx.close(&fvs, &body, false, span)?,
-                mask,
-            )
+        let recursive = f
+            .body
+            .as_ref()
+            .is_some_and(|b| mentions_block(b, &f.name.name));
+        let (ty, val, mask) = if !recursive {
+            self.try_fn(f, span, None)?
+        } else {
+            // structural recursion: try each parameter as the decreasing one
+            let mut first_err = None;
+            let mut found = None;
+            for k in 0..f.params.len() {
+                match self.try_fn(f, span, Some(k)) {
+                    Ok(r) => {
+                        found = Some(r);
+                        break;
+                    }
+                    Err(e) => {
+                        first_err.get_or_insert(e);
+                    }
+                }
+            }
+            match found {
+                Some(r) => r,
+                None => {
+                    return Err(first_err.unwrap_or(ElabError {
+                        msg: "a recursive function needs at least one parameter to recurse on"
+                            .into(),
+                        span: f.name.span,
+                    }))
+                }
+            }
         };
         self.add_def(&f.name, ty, val, mask)
+    }
+
+    /// Elaborate a function; `decr` is the index (among `params`) of the
+    /// parameter a recursive function decreases on.
+    fn try_fn(&self, f: &FnDecl, span: Span, decr: Option<usize>) -> R<(T, T, Vec<bool>)> {
+        let mut cx = self.cx();
+        let (fvs, mask) = cx.elab_binders(&f.generics, &f.params)?;
+        if let Some(k) = decr {
+            let nparams = f.params.len();
+            let explicit: Vec<u32> = fvs[fvs.len() - nparams..].to_vec();
+            let d = explicit[k];
+            let dty = from_kernel(cx.tc.local_ty(d), span)?;
+            let dty = from_kernel(cx.tc.whnf(&dty), span)?;
+            let (h, _) = app_spine(&dty);
+            let inductive = matches!(&*h, Term::Const(n, _) if matches!(self.env.get(n), Some(Decl::Inductive(_))));
+            if !inductive {
+                return err(
+                    f.params[k].name.span,
+                    "cannot recurse on a parameter whose type is not an inductive type",
+                );
+            }
+            cx.rec = Some(RecCtx {
+                name: f.name.name.clone(),
+                decr: d,
+                explicit,
+                fields: HashMap::new(),
+                in_top: false,
+            });
+        }
+        let ret = match &f.ret {
+            Some(t) => cx.elab_type(t)?,
+            None => cx.unit_type(),
+        };
+        let Some(block) = &f.body else {
+            return err(f.name.span, "a function needs a body");
+        };
+        let body = cx.elab_block(block, Some(&ret))?;
+        let body = cx.coerce(body, &ret, block.span)?;
+        Ok((
+            cx.close(&fvs, &ret, true, span)?,
+            cx.close(&fvs, &body, false, span)?,
+            mask,
+        ))
     }
 
     fn elab_theorem(&mut self, t: &TheoremDecl, span: Span) -> R<()> {
@@ -283,6 +340,31 @@ impl Elaborator {
     }
 }
 
+#[derive(Clone)]
+enum Pat {
+    Wild,
+    Var(String),
+    Ctor(String, Vec<Pat>),
+}
+
+struct Row<'e> {
+    pats: Vec<Pat>,
+    binds: Vec<(String, T)>,
+    body: &'e Expr,
+}
+
+/// State for elaborating a structurally recursive function.
+struct RecCtx {
+    name: String,
+    /// The decreasing parameter.
+    decr: u32,
+    /// All explicit parameters, in order.
+    explicit: Vec<u32>,
+    /// Recursive fields of the top-level match on `decr`, with their induction hypotheses.
+    fields: HashMap<u32, T>,
+    in_top: bool,
+}
+
 struct StructTele {
     params: Vec<u32>,
     fields: Vec<u32>,
@@ -301,7 +383,8 @@ struct Cx<'a> {
     env: &'a Env,
     masks: &'a Masks,
     aliases: &'a Aliases,
-    scope: Vec<(String, u32)>,
+    scope: Vec<(String, T)>,
+    rec: Option<RecCtx>,
     /// Where each metavariable was created, for "cannot infer" errors.
     spans: HashMap<u32, Span>,
 }
@@ -322,6 +405,7 @@ impl<'a> Cx<'a> {
             masks,
             aliases,
             scope: Vec::new(),
+            rec: None,
             spans: HashMap::new(),
         }
     }
@@ -370,7 +454,7 @@ impl<'a> Cx<'a> {
                 Mult::Omega
             };
             let id = self.tc.fresh(&g.name.name, ty, mult);
-            self.scope.push((g.name.name.clone(), id));
+            self.scope.push((g.name.name.clone(), fvar(id)));
             fvs.push(id);
             mask.push(true);
         }
@@ -382,7 +466,7 @@ impl<'a> Cx<'a> {
                 Mode::Default => Mult::Omega,
             };
             let id = self.tc.fresh(&p.name.name, ty, mult);
-            self.scope.push((p.name.name.clone(), id));
+            self.scope.push((p.name.name.clone(), fvar(id)));
             fvs.push(id);
             mask.push(false);
         }
@@ -396,7 +480,7 @@ impl<'a> Cx<'a> {
         for f in &d.fields {
             let ty = self.elab_type(&f.ty)?;
             let id = self.tc.fresh(&f.name.name, ty.clone(), Mult::Omega);
-            self.scope.push((f.name.name.clone(), id));
+            self.scope.push((f.name.name.clone(), fvar(id)));
             fields.push(id);
             field_tys.push(ty);
         }
@@ -428,8 +512,8 @@ impl<'a> Cx<'a> {
     // ---- name resolution ----
 
     fn resolve(&self, name: &str) -> Option<Res> {
-        if let Some((_, id)) = self.scope.iter().rev().find(|(n, _)| n == name) {
-            return Some(Res::Local(*id));
+        if let Some((_, t)) = self.scope.iter().rev().find(|(n, _)| n == name) {
+            return Some(Res::Local(t.clone()));
         }
         if let Some(full) = self.aliases.get(name) {
             return Some(Res::Global(full.clone()));
@@ -457,7 +541,7 @@ impl<'a> Cx<'a> {
             _ => {}
         }
         match self.resolve(path)? {
-            Res::Local(id) => Some((fvar(id), vec![])),
+            Res::Local(t) => Some((t, vec![])),
             Res::Global(n) => Some(self.const_term(&n)),
         }
     }
@@ -513,6 +597,12 @@ impl<'a> Cx<'a> {
         match &e.kind {
             ExprKind::Var(_) | ExprKind::Field(..) => {
                 if let Some(path) = path_name(e) {
+                    if self.rec.as_ref().is_some_and(|r| r.name == path) {
+                        return err(
+                            e.span,
+                            "a recursive function must be called with all of its arguments",
+                        );
+                    }
                     if let Some(head) = self.head_of(&path) {
                         return self.elab_app(head, vec![], exp, e.span);
                     }
@@ -551,6 +641,11 @@ impl<'a> Cx<'a> {
                 Ok(pi(Mult::Omega, a, b))
             }
             ExprKind::Call(f, args) | ExprKind::TypeApp(f, args) => {
+                if let Some(p) = path_name(f) {
+                    if self.rec.as_ref().is_some_and(|r| r.name == p) {
+                        return self.elab_rec_call(args, exp, e.span);
+                    }
+                }
                 let head = match path_name(f).and_then(|p| self.head_of(&p)) {
                     Some(h) => h,
                     None if matches!(f.kind, ExprKind::Var(_)) => {
@@ -575,7 +670,7 @@ impl<'a> Cx<'a> {
                 e.span,
                 "references are not supported by the elaborator yet (borrow checker, M5)",
             ),
-            ExprKind::Match(..) => err(e.span, "`match` is not supported yet (M3b)"),
+            ExprKind::Match(scrut, arms) => self.elab_match(scrut, arms, exp, e.span),
             ExprKind::Neg(_) => err(e.span, "negation is not supported yet"),
             ExprKind::Str(_) => err(e.span, "string literals are not supported yet"),
         }
@@ -688,7 +783,7 @@ impl<'a> Cx<'a> {
                     let vty = self.tc.zonk(&vty);
                     let x = self.tc.fresh(&name.name, vty.clone(), Mult::Omega);
                     lets.push((x, vty, val));
-                    self.scope.push((name.name.clone(), x));
+                    self.scope.push((name.name.clone(), fvar(x)));
                 }
                 Stmt::Expr(e) => {
                     let v = self.elab(e, None)?;
@@ -715,6 +810,328 @@ impl<'a> Cx<'a> {
             r = let_(Mult::Omega, ty, val, abstract_fvars(&r, &[x]));
         }
         Ok(r)
+    }
+
+    // ---- pattern matching ----
+
+    fn global_ctor(&self, name: &str) -> Option<String> {
+        let full = self
+            .aliases
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string());
+        matches!(self.env.get(&full), Some(Decl::Ctor(_))).then_some(full)
+    }
+
+    fn elab_pattern(&self, e: &Expr) -> R<Pat> {
+        match &e.kind {
+            ExprKind::Wild => Ok(Pat::Wild),
+            ExprKind::Var(n) => Ok(match self.global_ctor(n) {
+                Some(full) => Pat::Ctor(full, vec![]),
+                None => Pat::Var(n.clone()),
+            }),
+            ExprKind::Field(..) => match path_name(e).and_then(|p| self.global_ctor(&p)) {
+                Some(full) => Ok(Pat::Ctor(full, vec![])),
+                None => err(e.span, "unknown constructor in pattern"),
+            },
+            ExprKind::Nat(0) => Ok(Pat::Ctor("Nat.zero".into(), vec![])),
+            ExprKind::Nat(k) => {
+                let inner = self.elab_pattern(&Expr {
+                    kind: ExprKind::Nat(k - 1),
+                    span: e.span,
+                })?;
+                Ok(Pat::Ctor("Nat.succ".into(), vec![inner]))
+            }
+            ExprKind::Call(f, args) => {
+                let Some(full) = path_name(f).and_then(|p| self.global_ctor(&p)) else {
+                    return err(f.span, "unknown constructor in pattern");
+                };
+                let subs = args
+                    .iter()
+                    .map(|a| self.elab_pattern(a))
+                    .collect::<R<Vec<_>>>()?;
+                Ok(Pat::Ctor(full, subs))
+            }
+            _ => err(e.span, "this kind of pattern is not supported yet"),
+        }
+    }
+
+    fn elab_match(&mut self, scrut: &Expr, arms: &[Arm], exp: Option<&T>, span: Span) -> R<T> {
+        let ret = match exp {
+            Some(t) => t.clone(),
+            None => {
+                let l = self.tc.new_level_mvar();
+                let s = self.new_mvar(sort(l), span);
+                self.new_mvar(s, span)
+            }
+        };
+        let s = self.elab(scrut, None)?;
+        let s = self.tc.zonk(&s);
+        let (x, wrap) = match &*s {
+            Term::FVar(id) => (*id, None),
+            _ => {
+                let ty = from_kernel(self.tc.infer(&s), scrut.span)?;
+                let ty = self.tc.zonk(&ty);
+                (
+                    self.tc.fresh("m", ty.clone(), Mult::Omega),
+                    Some((ty, s.clone())),
+                )
+            }
+        };
+        let mut rows = Vec::new();
+        for a in arms {
+            rows.push(Row {
+                pats: vec![self.elab_pattern(&a.pat)?],
+                binds: vec![],
+                body: &a.body,
+            });
+        }
+        let top = match &mut self.rec {
+            Some(rc) if rc.decr == x && !rc.in_top => {
+                rc.in_top = true;
+                true
+            }
+            _ => false,
+        };
+        let r = self.compile_match(vec![x], rows, &ret, top, span);
+        if top {
+            if let Some(rc) = &mut self.rec {
+                rc.in_top = false;
+            }
+        }
+        let r = r?;
+        Ok(match wrap {
+            None => r,
+            Some((ty, val)) => {
+                let r = self.tc.zonk(&r);
+                let_(Mult::Omega, ty, val, abstract_fvars(&r, &[x]))
+            }
+        })
+    }
+
+    /// Decision-tree compilation of a pattern matrix into recursor applications.
+    fn compile_match(
+        &mut self,
+        cols: Vec<u32>,
+        rows: Vec<Row<'_>>,
+        ret: &T,
+        top: bool,
+        span: Span,
+    ) -> R<T> {
+        let Some(first) = rows.first() else {
+            return err(span, "non-exhaustive patterns");
+        };
+        let Some(j) = first.pats.iter().position(|p| matches!(p, Pat::Ctor(..))) else {
+            // leaf: bind variables and elaborate the arm
+            let depth = self.scope.len();
+            for (n, t) in &first.binds {
+                self.scope.push((n.clone(), t.clone()));
+            }
+            for (p, &c) in first.pats.iter().zip(&cols) {
+                if let Pat::Var(n) = p {
+                    self.scope.push((n.clone(), fvar(c)));
+                }
+            }
+            let r = self.elab_check(first.body, ret);
+            self.scope.truncate(depth);
+            return r;
+        };
+        let x = cols[j];
+        let xty = from_kernel(self.tc.local_ty(x), span)?;
+        let xty = from_kernel(self.tc.whnf(&xty), span)?;
+        let (head, targs) = app_spine(&xty);
+        let Term::Const(iname, ilevels) = &*head else {
+            return err(
+                span,
+                format!("cannot match on a value of type `{}`", self.pp(&xty)),
+            );
+        };
+        let Some(Decl::Inductive(info)) = self.env.get(iname) else {
+            return err(
+                span,
+                format!("cannot match on a value of type `{}`", self.pp(&xty)),
+            );
+        };
+        if info.nindices > 0 {
+            return err(span, "matching on indexed families is not supported yet");
+        }
+        let (ctors, ind_nlevels): (Vec<String>, usize) = (
+            info.ctors.iter().map(|c| c.to_string()).collect(),
+            info.lparams.len(),
+        );
+        let params = targs[..info.nparams].to_vec();
+        let iname = iname.to_string();
+        let ilevels = ilevels.clone();
+
+        // motive: fun (t : I params) => ret[x := t], generalizing the other
+        // parameters when this is the top-level split of a recursive function
+        let others: Vec<u32> = match (&self.rec, top) {
+            (Some(rc), true) => rc
+                .explicit
+                .iter()
+                .copied()
+                .filter(|&p| p != rc.decr)
+                .collect(),
+            _ => vec![],
+        };
+        self.tc.zonk_locals();
+        let ret_z = self.tc.zonk(ret);
+        let motive_res = self.tc.mk_pi(&others, &ret_z);
+        let motive_abs = abstract_fvars(&motive_res, &[x]);
+        let ret_abs = abstract_fvars(&ret_z, &[x]);
+        let lvl = from_kernel(self.tc.check_is_type(&motive_res), span)?;
+        let lvl = self.tc.zonk_level(&lvl);
+        let rec_name = format!("{iname}.rec");
+        let large = match self.env.get(&rec_name) {
+            Some(Decl::Rec(r)) => r.lparams.len() > ind_nlevels,
+            _ => return err(span, "missing recursor"),
+        };
+        let mut rec_levels = ilevels.clone();
+        if large {
+            rec_levels.insert(0, lvl);
+        } else if !lvl.is_zero() {
+            return err(
+                span,
+                format!("`{iname}` can only be matched when the result is a proposition"),
+            );
+        }
+        let motive = lam(Mult::Omega, xty.clone(), motive_abs.clone());
+
+        let mut minors = Vec::new();
+        for cname in &ctors {
+            let cty = from_kernel(self.env.const_type(cname, &ilevels), span)?;
+            let rest = from_kernel(self.tc.instantiate_pis(&cty, &params), span)?;
+            let (fields, _) = from_kernel(self.tc.telescope(&rest, None), span)?;
+            let fterms: Vec<T> = fields.iter().map(|&f| fvar(f)).collect();
+            let ctor_app = mk_apps(
+                &cnst(cname.as_str().into(), ilevels.clone()),
+                &[params.clone(), fterms].concat(),
+            );
+            let ret_c = instantiate(&ret_abs, &ctor_app);
+
+            // induction hypotheses for recursive fields
+            let mut ihs = Vec::new();
+            for &f in &fields {
+                let fty = from_kernel(self.tc.local_ty(f), span)?;
+                if !contains_const(&fty, &iname) {
+                    continue;
+                }
+                let (xs, _) = from_kernel(self.tc.telescope(&fty, None), span)?;
+                let applied = mk_apps(&fvar(f), &xs.iter().map(|&v| fvar(v)).collect::<Vec<_>>());
+                let ih_res = instantiate(&motive_abs, &applied);
+                let ih_ty = self.tc.mk_pi(&xs, &ih_res);
+                let ih = self.tc.fresh("ih", ih_ty, Mult::Omega);
+                if top {
+                    if let Some(rc) = &mut self.rec {
+                        rc.fields.insert(f, fvar(ih));
+                    }
+                }
+                ihs.push(ih);
+            }
+
+            // specialize the rows to this constructor
+            let mut new_cols: Vec<u32> = cols[..j].to_vec();
+            new_cols.extend(&fields);
+            new_cols.extend(&cols[j + 1..]);
+            let mut new_rows = Vec::new();
+            for row in &rows {
+                let (before, after) = (&row.pats[..j], &row.pats[j + 1..]);
+                let mut binds = row.binds.clone();
+                let mid: Vec<Pat> = match &row.pats[j] {
+                    Pat::Ctor(c, subs) if c == cname => {
+                        if subs.len() != fields.len() {
+                            return err(
+                                span,
+                                format!(
+                                    "constructor `{cname}` takes {} fields, the pattern has {}",
+                                    fields.len(),
+                                    subs.len()
+                                ),
+                            );
+                        }
+                        subs.clone()
+                    }
+                    Pat::Ctor(..) => continue,
+                    Pat::Var(n) => {
+                        binds.push((n.clone(), ctor_app.clone()));
+                        vec![Pat::Wild; fields.len()]
+                    }
+                    Pat::Wild => vec![Pat::Wild; fields.len()],
+                };
+                let pats = [before, &mid[..], after].concat();
+                new_rows.push(Row {
+                    pats,
+                    binds,
+                    body: row.body,
+                });
+            }
+            if new_rows.is_empty() {
+                return err(span, format!("non-exhaustive patterns: missing `{cname}`"));
+            }
+            // inside the branch the scrutinee *is* the constructor application
+            let xt = fvar(x);
+            let saved = self.scope.clone();
+            for (_, t) in self.scope.iter_mut() {
+                if *t == xt {
+                    *t = ctor_app.clone();
+                }
+            }
+            let sub = self.compile_match(new_cols, new_rows, &ret_c, false, span);
+            self.scope = saved;
+            let sub = sub?;
+            self.tc.zonk_locals();
+            let sub = self.tc.zonk(&sub);
+            let body = if top {
+                self.tc.mk_lam(&others, &sub)
+            } else {
+                sub
+            };
+            let binders: Vec<u32> = fields.iter().chain(&ihs).copied().collect();
+            minors.push(self.tc.mk_lam(&binders, &body));
+        }
+        let mut args = params;
+        args.push(motive);
+        args.extend(minors);
+        args.push(fvar(x));
+        args.extend(others.iter().map(|&o| fvar(o)));
+        Ok(mk_apps(&cnst(rec_name.as_str().into(), rec_levels), &args))
+    }
+
+    /// `f(args)` inside the body of a structurally recursive `f`: becomes the
+    /// induction hypothesis of the matched parameter's field.
+    fn elab_rec_call(&mut self, args: &[Expr], exp: Option<&T>, span: Span) -> R<T> {
+        let rc = self.rec.as_ref().expect("recursion context");
+        let (decr, explicit) = (rc.decr, rc.explicit.clone());
+        if args.len() != explicit.len() {
+            return err(
+                span,
+                "a recursive call must supply all of the function's arguments",
+            );
+        }
+        let k = explicit
+            .iter()
+            .position(|&p| p == decr)
+            .expect("decreasing parameter is explicit");
+        let dty = from_kernel(self.tc.local_ty(decr), span)?;
+        let arg = self.elab_check(&args[k], &dty)?;
+        let arg = self.tc.zonk(&arg);
+        let ih = match &*arg {
+            Term::FVar(f) => self.rec.as_ref().and_then(|rc| rc.fields.get(f).cloned()),
+            _ => None,
+        };
+        let Some(ih) = ih else {
+            return err(
+                args[k].span,
+                "this recursive call is not structural: its argument must be a field bound by matching on the parameter",
+            );
+        };
+        let rest: Vec<Arg> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != k)
+            .map(|(_, a)| Arg::Expr(a))
+            .collect();
+        self.elab_app((ih, vec![]), rest, exp, span)
     }
 
     fn elab_if(
@@ -745,4 +1162,36 @@ impl<'a> Cx<'a> {
         // Bool.rec motive (false case) (true case) major
         Ok(mk_apps(&rec, &[motive, else_t, then_t, c]))
     }
+}
+
+fn mentions_expr(e: &Expr, name: &str) -> bool {
+    match &e.kind {
+        ExprKind::Var(n) => n == name,
+        ExprKind::Nat(_) | ExprKind::Str(_) | ExprKind::Wild | ExprKind::Unit => false,
+        ExprKind::Neg(a) => mentions_expr(a, name),
+        ExprKind::Binary(_, a, b) | ExprKind::Arrow(a, b) => {
+            mentions_expr(a, name) || mentions_expr(b, name)
+        }
+        ExprKind::Ref { inner, .. } => mentions_expr(inner, name),
+        ExprKind::Call(f, args) | ExprKind::TypeApp(f, args) => {
+            mentions_expr(f, name) || args.iter().any(|a| mentions_expr(a, name))
+        }
+        ExprKind::Field(b, _) => mentions_expr(b, name),
+        ExprKind::Block(b) => mentions_block(b, name),
+        ExprKind::If(c, t, e) => {
+            mentions_expr(c, name)
+                || mentions_block(t, name)
+                || e.as_ref().is_some_and(|e| mentions_expr(e, name))
+        }
+        ExprKind::Match(s, arms) => {
+            mentions_expr(s, name) || arms.iter().any(|a| mentions_expr(&a.body, name))
+        }
+    }
+}
+
+fn mentions_block(b: &Block, name: &str) -> bool {
+    b.stmts.iter().any(|s| match s {
+        Stmt::Let { init, .. } => mentions_expr(init, name),
+        Stmt::Expr(e) => mentions_expr(e, name),
+    }) || b.tail.as_ref().is_some_and(|t| mentions_expr(t, name))
 }
