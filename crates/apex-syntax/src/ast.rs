@@ -353,6 +353,10 @@ pub enum TacticKind {
     Induction(Ident, Vec<Ident>, Option<Vec<CaseArm>>),
     /// `cases h` or `cases f(x)` (the proof term is first introduced as a hypothesis)
     Cases(Expr, Option<Vec<CaseArm>>),
+    /// `cases h : e with { .. }` on a non-variable `e`: split on its value, keeping `h : e = c`.
+    CasesEq(Ident, Expr, Option<Vec<CaseArm>>),
+    /// `generalize h : e = x`: replace `e` in the goal by a new variable `x`, keeping `h : e = x`.
+    Generalize(Option<Ident>, Expr, Ident),
     /// Move hypotheses back into the goal as premises.
     Revert(Vec<Ident>),
     /// `injection h with a b`: the field equations of `h : C as = C bs`.
@@ -376,6 +380,8 @@ pub enum TacticKind {
     Congr,
     /// `calc { a = b := p; _ = c := q }`
     Calc(Vec<CalcStep>),
+    /// `ring`: commutative-semiring identities over `Nat`, by a verified normalizer.
+    Ring,
     /// Try `rfl`, `assumption`, `True.intro`, `decide`, `omega`, `simp`.
     Trivial,
     /// `exists w`: prove `Exists p` by giving the witness.

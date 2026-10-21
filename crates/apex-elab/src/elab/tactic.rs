@@ -14,6 +14,7 @@ mod extra;
 mod imatch;
 mod noconf;
 mod omega;
+mod ring;
 
 /// Options of `simp`.
 #[derive(Default, Clone, Copy)]
@@ -451,6 +452,19 @@ impl<'a> Cx<'a> {
             TacticKind::Contradiction => self.t_contradiction(st, g, span),
             TacticKind::Injection(h, names) => self.t_injection(st, g, h, names, span),
             TacticKind::Subst(n) => self.t_subst(st, g, n, span),
+            TacticKind::CasesEq(h, e, arms) => {
+                let tm = self.elab_in_goal(e, None)?;
+                let ty = from_kernel(self.tc.infer(&tm), e.span)?;
+                let ty = self.tc.zonk(&ty);
+                self.t_cases_eq(st, g, h, (tm, ty), arms.as_deref(), span)
+            }
+            TacticKind::Generalize(h, e, x) => {
+                let tm = self.elab_in_goal(e, None)?;
+                let ty = from_kernel(self.tc.infer(&tm), e.span)?;
+                let ty = self.tc.zonk(&ty);
+                let (ng, _) = self.generalize_term(st, &g, h.as_ref(), (tm, ty), &x.name, span)?;
+                Ok(vec![ng])
+            }
             TacticKind::Rcases(e, pat) => self.t_rcases(st, g, e, pat, span),
             TacticKind::Rintro(pats) => self.t_rintro(st, g, pats, span),
             TacticKind::ByCases(n, p) => self.t_by_cases(st, g, n.as_ref(), p, span),
@@ -461,6 +475,7 @@ impl<'a> Cx<'a> {
             TacticKind::Congr => self.t_congr(st, g, span),
             TacticKind::Calc(steps) => self.t_calc(st, g, steps, span),
             TacticKind::Trivial => self.t_trivial(st, g, span),
+            TacticKind::Ring => self.t_ring(st, g, span),
             TacticKind::Symm => {
                 let Some((l, alpha, a, b)) = self.eq_parts(&g.target) else {
                     return err(span, "`symm` needs a goal of the form `a = b`");
@@ -680,6 +695,14 @@ impl<'a> Cx<'a> {
                 let tm = self.elab_in_goal(e, None)?;
                 let ty = from_kernel(self.tc.infer(&tm), e.span)?;
                 let ty = self.tc.zonk(&ty);
+                if !self.is_prop_type(&ty) {
+                    // data: split on its value, as `cases heq : e`
+                    let h = Ident {
+                        name: "heq".into(),
+                        span: e.span,
+                    };
+                    return self.t_cases_eq(st, g, &h, (tm, ty), arms.as_deref(), span);
+                }
                 let fv = self.tc.fresh("_c", ty.clone(), Mult::Omega);
                 let mut ng = self.new_goal(&g, g.target.clone(), "");
                 ng.scope.push(("_c".into(), fvar(fv)));
@@ -1322,7 +1345,19 @@ impl<'a> Cx<'a> {
                     let hterm = match r {
                         Rule::Term(h) => h.clone(),
                         Rule::Global(n) => self.const_term(n).0,
-                        Rule::Unfold(_) => continue,
+                        Rule::Unfold(n) => {
+                            // `simp [f] at h`: evaluate one call of `f` in the hypothesis
+                            if let Some(kn) = match self.resolve(&n.name) {
+                                Some(Res::Global(kn)) => Some(kn),
+                                _ => None,
+                            } {
+                                if let Some(ng) = self.eval_hyp(st, &cur, &h.name, Some(&kn)) {
+                                    next = Some(ng);
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
                     };
                     let snap = self.tc.snapshot();
                     let rule = self.open_rule(&hterm, span)?;
@@ -1342,6 +1377,10 @@ impl<'a> Cx<'a> {
                         }
                     }
                     self.tc.restore(snap);
+                }
+                if next.is_none() {
+                    // iota / evaluation inside the hypothesis
+                    next = self.eval_hyp(st, &cur, &h.name, None);
                 }
                 match next {
                     Some(ng) => {
@@ -1501,6 +1540,34 @@ impl<'a> Cx<'a> {
         (cur != *s).then_some(cur)
     }
 
+    /// One evaluation step (iota, or an unfolding of a call) inside the hypothesis `name`.
+    fn eval_hyp(&mut self, st: &mut Tac, g: &Goal, name: &str, only: Option<&str>) -> Option<Goal> {
+        let pos = g.scope.iter().rposition(|(n, _)| plain_name(n) == name)?;
+        let Term::FVar(id) = &*g.scope[pos].1 else {
+            return None;
+        };
+        let ty = self.tc.local_ty(*id).ok()?;
+        let ty = self.tc.zonk(&ty);
+        let reduced = if only.is_none() {
+            self.reduce_recs(&ty, 0)
+        } else {
+            ty.clone()
+        };
+        let t2 = if reduced != ty {
+            reduced
+        } else {
+            self.eval_step_named(&ty, only)?
+        };
+        let new_h = self.tc.fresh(&g.scope[pos].0, t2.clone(), Mult::Omega);
+        let mut ng = self.new_goal(g, g.target.clone(), "");
+        ng.scope[pos] = (g.scope[pos].0.clone(), fvar(new_h));
+        let lam_mv = self.tc.new_mvar(pi(Mult::Omega, t2, g.target.clone()));
+        st.sol
+            .insert(mvar_id(&lam_mv), Sol::Lam(vec![new_h], ng.mv));
+        self.solve(st, g, app(lam_mv, g.scope[pos].1.clone()));
+        Some(ng)
+    }
+
     /// Turn recursor applications that are recursive calls of `f` back into calls:
     /// `Rec params motive minors major others` is `f` applied with the major premise at
     /// the position of the decreasing parameter. Found by trying each position and
@@ -1591,11 +1658,29 @@ impl<'a> Cx<'a> {
     /// term unfolds into one; such results are not wanted in the goal.)
     fn mentions_rec(&self, t: &T) -> bool {
         match &**t {
-            // `if` is `Bool.rec`: a stuck condition is fine, a rewrite can still decide it
+            // a bare recursor constant (partially applied): not wanted
             Term::Const(n, _) => {
                 &**n != "Bool.rec" && matches!(self.env.get(n), Some(Decl::Rec(_)))
             }
-            Term::App(f, a) => self.mentions_rec(f) || self.mentions_rec(a),
+            Term::App(..) => {
+                let (h, args) = app_spine(t);
+                if let Term::Const(n, _) = &*h {
+                    if let Some(Decl::Rec(r)) = self.env.get(n) {
+                        let major = r.nparams + r.nmotives + r.nminors + r.nindices;
+                        // `if` and `match` on a computed value (a call that is stuck) are fine:
+                        // a rewrite with an equation about it decides the branch later.
+                        // A recursor waiting for a variable is a stuck definition.
+                        let waiting_on_var = args.get(major).is_none_or(|m| {
+                            matches!(&*app_spine(m).0, Term::FVar(_) | Term::BVar(_))
+                        });
+                        if &**n != "Bool.rec" && waiting_on_var {
+                            return true;
+                        }
+                        return args.iter().any(|a| self.mentions_rec(a));
+                    }
+                }
+                self.mentions_rec(&h) || args.iter().any(|a| self.mentions_rec(a))
+            }
             Term::Lam(_, ty, b) | Term::Pi(_, ty, b) => {
                 self.mentions_rec(ty) || self.mentions_rec(b)
             }

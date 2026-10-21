@@ -70,6 +70,8 @@ theorem add_comm(a: Nat, b: Nat): a + b = b + a := by {
 | `funext x` | `f = g`를 `f x = g x`로 |
 | `congr` | `f a = f b`를 `a = b`로 (`congr_arg` 연쇄) |
 | `calc { a = b := p; _ <= c := q }` | 등식/`<=`/`lt` 연쇄 (`Eq.trans`/`le_trans`/`lt_of_lt_of_le` …). 단계 증명은 항 또는 `by { .. }` |
+| `generalize h : e = x` / `cases h : e with { .. }` | 식 `e`를 새 변수로 바꾸고(`h : e = x` 유지) 값으로 경우 나누기. `cases e`(증명이 아닌 `e`)도 같다 |
+| `ring` | `Nat`의 가환 반환 항등식. 양변을 `RE`로 reify해 검증된 정규화 `norm`(정렬된 단항식 목록)을 커널이 계산으로 비교한다 (`prelude_ring.apex`, `ring_sound`는 전부 탭틱으로 증명). 원자는 `+ * Nat.succ` 리터럴이 아닌 항 |
 | `trivial` | `rfl`/`assumption`/`True.intro`/`decide`/`omega`/`simp` 중 되는 것 |
 | `change T` | `show T`의 별칭 |
 
@@ -114,6 +116,7 @@ theorem add_comm(a: Nat, b: Nat): a + b = b + a := by {
 
 ## 7. 함수 펼치기 (simp / unfold)
 
+`simp at h`도 가설 안에서 같은 평가(ι, 호출 펼침)를 한다. `unfold f at h`는 `simp only [f] at h`.
 `simp [f]`와 `simp`는 인자가 생성자인 `f`의 호출을 한 걸음씩 평가한다: 정의를 펼치고 β·ι 환원한 뒤, 결과에 나온 재귀 호출(커널에서는 재귀자 `List.rec ..`)을
 `f(..)` 호출로 되돌려 접는다 (재귀자의 주 전제 위치를 매개변수 자리마다 시도해 정의적 동치로 확인). 인자가 변수라 막히면(재귀자가 변수를 기다리면) 펼치지 않는다.
 `if`는 `Bool.rec`이므로 조건이 막혀 있어도 펼친다: 조건을 가설(`c : p x = true`)로 다시 쓰면 다음 걸음에서 분기가 결정된다.

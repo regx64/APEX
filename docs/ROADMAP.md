@@ -29,7 +29,7 @@
 ## D. 자동화
 - [x] D-1 `omega` (Nat 선형 산술, 검증된 증명서 검사기; Int·`/`·`%`·정수 타이트닝은 아직)
 - [x] D-2 `simp` 확장 (`at`, 조건부 재작성, `simp only`/`simp_arith`/`simp_all`; 합동 기반 재작성은 아직)
-- [ ] D-3 `ring`/`linarith`
+- [~] D-3 `ring`(`Nat` 가환 반환, 반사적 증명: 정규화기와 건전성 증명이 `prelude_ring.apex`) 완료. `linarith`는 `omega`의 별칭, `Int`/체/`nlinarith`는 아직
 - [ ] D-4 `conv`
 - [x] D-5 `auto`: 되돌리는 증명 탐색 (가설/`rfl`/`True`/모순/`intro`/`∧`·`∨` 분해와 선택/`simp`/`omega`/가설 분해/전방 추론/함의 적용; 깊이 6). `aesop`의 규칙 집합·우선순위·`simp_all` 통합은 없음
 

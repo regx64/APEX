@@ -62,6 +62,56 @@ impl<'a> Cx<'a> {
         }
     }
 
+    // ---- generalize / cases on an expression ----
+
+    /// Replace the term `e : ty` in the goal by a new variable `x`, with `h : e = x`.
+    pub(super) fn generalize_term(
+        &mut self,
+        st: &mut Tac,
+        g: &Goal,
+        h: Option<&Ident>,
+        (e, ty): (T, T),
+        x: &str,
+        span: Span,
+    ) -> R<(Goal, u32)> {
+        let e = self.tc.zonk(&e);
+        let tgt = self.tc.zonk(&g.target);
+        let abs = replace_term(&tgt, &e, 0);
+        let l = self.sort_level_of(&ty, span)?;
+        let xv = self.tc.fresh(x, ty.clone(), Mult::Omega);
+        let eq = mk_apps(
+            &cnst("Eq".into(), vec![l.clone()]),
+            &[ty.clone(), e.clone(), fvar(xv)],
+        );
+        let hn = h.map_or("heq".to_string(), |h| h.name.clone());
+        let hv = self.tc.fresh(&hn, eq, Mult::Omega);
+        let new_tgt = instantiate(&abs, &fvar(xv));
+        let mut ng = self.new_goal(g, new_tgt.clone(), "");
+        ng.scope.push((x.to_string(), fvar(xv)));
+        ng.scope.push((hn, fvar(hv)));
+        let lam_ty = self.tc.mk_pi(&[xv, hv], &new_tgt);
+        let lam_mv = self.tc.new_mvar(lam_ty);
+        st.sol
+            .insert(mvar_id(&lam_mv), Sol::Lam(vec![xv, hv], ng.mv));
+        let refl = mk_apps(&cnst("Eq.refl".into(), vec![l]), &[ty, e.clone()]);
+        self.solve(st, g, mk_apps(&lam_mv, &[e, refl]));
+        Ok((ng, xv))
+    }
+
+    /// `cases h : e`: generalize `e`, then split on the new variable.
+    pub(super) fn t_cases_eq(
+        &mut self,
+        st: &mut Tac,
+        g: Goal,
+        h: &Ident,
+        term: (T, T),
+        arms: Option<&[CaseArm]>,
+        span: Span,
+    ) -> R<Vec<Goal>> {
+        let (ng, _) = self.generalize_term(st, &g, Some(h), term, "_cv", span)?;
+        self.t_induct(st, ng, &ident("_cv", span), &[], arms, false, span)
+    }
+
     // ---- subst ----
 
     pub(super) fn t_subst(

@@ -79,6 +79,7 @@ const TACTIC_WORDS: &[&str] = &[
     "cases",
     "revert",
     "injection",
+    "generalize",
     "subst",
     "rcases",
     "obtain",
@@ -91,6 +92,7 @@ const TACTIC_WORDS: &[&str] = &[
     "congr",
     "calc",
     "trivial",
+    "ring",
     "change",
     "try",
     "repeat",
@@ -488,6 +490,24 @@ impl Parser {
             }
             "unfold" => {
                 let names = self.binder_names()?;
+                if matches!(self.peek(), T::Ident(w) if w == "at") {
+                    // `unfold f at h` is `simp only [f] at h`
+                    let at = self.at_clause()?;
+                    if names.is_empty() {
+                        return self.err("`unfold` needs at least one name");
+                    }
+                    let rules = names
+                        .into_iter()
+                        .map(|n| Expr {
+                            span: n.span,
+                            kind: ExprKind::Var(n.name),
+                        })
+                        .collect();
+                    return Ok(Tactic {
+                        kind: K::SimpOnly(rules, at),
+                        span: start.to(self.prev_span()),
+                    });
+                }
                 if names.is_empty() {
                     return self.err("`unfold` needs at least one name");
                 }
@@ -515,6 +535,7 @@ impl Parser {
             "subst" => K::Subst(self.ident()?),
             "change" => K::Show(self.ty()?),
             "trivial" => K::Trivial,
+            "ring" => K::Ring,
             "congr" => K::Congr,
             "refine" => K::Refine(self.expr()?),
             "specialize" => K::Specialize(self.expr()?),
@@ -599,10 +620,40 @@ impl Parser {
                 K::Injection(h, names)
             }
             "cases" => {
-                let v = self.expr()?;
-                K::Cases(v, self.case_arms()?)
+                // `cases h : e with ..` names the equation `h : e = c` each case carries
+                let named = matches!(self.peek(), T::Ident(_))
+                    && self
+                        .toks
+                        .get(self.pos + 1)
+                        .is_some_and(|t| t.kind == T::Colon);
+                if named {
+                    let h = self.ident()?;
+                    self.expect(&T::Colon)?;
+                    let v = self.expr()?;
+                    K::CasesEq(h, v, self.case_arms()?)
+                } else {
+                    let v = self.expr()?;
+                    K::Cases(v, self.case_arms()?)
+                }
             }
-            _ => unreachable!("every tactic word is handled"),
+            "generalize" => {
+                let named = matches!(self.peek(), T::Ident(_))
+                    && self
+                        .toks
+                        .get(self.pos + 1)
+                        .is_some_and(|t| t.kind == T::Colon);
+                let h = if named {
+                    let h = self.ident()?;
+                    self.expect(&T::Colon)?;
+                    Some(h)
+                } else {
+                    None
+                };
+                let e = self.expr()?;
+                self.expect(&T::Eq)?;
+                K::Generalize(h, e, self.ident()?)
+            }
+            other => return self.err(format!("`{other}` cannot start a tactic here")),
         };
         Ok(Tactic {
             kind,

@@ -488,6 +488,26 @@ impl Elaborator {
         });
     }
 
+    /// Load the verified `ring` normalizer (and the arithmetic library it uses).
+    pub fn load_ring(&mut self) {
+        if self.env.get("ring_sound").is_some() {
+            return;
+        }
+        self.load_omega();
+        let src = include_str!("prelude_ring.apex");
+        let module = apex_syntax::parse(src).expect("ring prelude must parse");
+        self.prelude_loaded = false;
+        let result = self.elab_module(&module);
+        self.prelude_loaded = true;
+        result.unwrap_or_else(|e| {
+            let (line, _) = e.span.line_col(src);
+            panic!(
+                "ring prelude must elaborate: {} (prelude_ring.apex line {line})",
+                e.msg
+            )
+        });
+    }
+
     /// Load classical logic (`em`, `by_contradiction`); `by_cases` and `by_contra` need it.
     pub fn load_classical(&mut self) {
         if self.env.get("em").is_some() {
@@ -536,6 +556,9 @@ impl Elaborator {
                     .collect()
             })
             .unwrap_or_default();
+        if mentions("ring") {
+            self.load_ring();
+        }
         if mentions("em")
             || mentions("by_contradiction")
             || mentions("not_not")
