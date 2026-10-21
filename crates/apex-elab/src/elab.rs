@@ -343,6 +343,8 @@ struct Tables {
     vars: Vec<Param>,
     /// Struct declarations (after flattening `extends`), for children and `derive`.
     struct_decls: HashMap<String, StructDecl>,
+    /// Operators and macros declared by the files elaborated so far.
+    notations: Notations,
 }
 
 #[derive(Clone)]
@@ -551,6 +553,10 @@ impl Elaborator {
     }
 
     pub fn elab_module(&mut self, m: &Module) -> R<()> {
+        let n = &m.notations;
+        self.tables.notations.infix.extend(n.infix.clone());
+        self.tables.notations.prefix.extend(n.prefix.clone());
+        self.tables.notations.macros.extend(n.macros.clone());
         for item in &m.items {
             self.elab_item(item)?;
         }
@@ -587,7 +593,7 @@ impl Elaborator {
                 self.tables.vars.truncate(saved.1);
                 r
             }
-            ItemKind::Import(_) => Ok(()), // loaded by the driver
+            ItemKind::Import(_) | ItemKind::Notation(_) => Ok(()), // loaded by the driver / applied by the parser
             ItemKind::Open(name) => {
                 self.tables.opens.push(name.clone());
                 Ok(())
@@ -844,7 +850,7 @@ impl Elaborator {
             let proof = match &t.proof {
                 Proof::Term(e) => cx.elab_check(e, &stmt)?,
                 Proof::Tactic(toks) => {
-                    let tacs = apex_syntax::parse_tactics(toks, span)
+                    let tacs = apex_syntax::parse_tactics(toks, span, &self.tables.notations)
                         .map_err(|e| ElabError::new(e.span, e.msg))?;
                     cx.prove(&stmt, &tacs, span)?
                 }

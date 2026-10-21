@@ -6,6 +6,17 @@ use apex_span::Span;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Module {
     pub items: Vec<Item>,
+    /// Operators and macros this file declares (needed to parse its tactic blocks later).
+    pub notations: Notations,
+}
+
+/// User-declared syntax. Binding power `lbp` of an operator, whether it associates to
+/// the right, and the function it calls; macros are parameter lists with a template.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Notations {
+    pub infix: std::collections::HashMap<String, (u8, bool, String)>,
+    pub prefix: std::collections::HashMap<String, (u8, String)>,
+    pub macros: std::collections::HashMap<String, (Vec<String>, Expr)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +46,9 @@ pub enum ItemKind {
     Variable(Vec<Param>),
     /// `import a.b;`: the module `a/b.apex`, loaded by the driver before this file.
     Import(String),
+    /// `infixl 65 "+++" => f;`, `prefix 100 "~" => g;`, `macro m(a, b) => e;`: already applied
+    /// by the parser; kept so tools can list them.
+    Notation(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

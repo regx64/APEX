@@ -144,9 +144,8 @@ impl Elaborator {
         decreasing: Option<&[apex_syntax::Token]>,
     ) -> R<(FnParts, Option<WfEq>)> {
         let tactics = match decreasing {
-            Some(toks) => {
-                apex_syntax::parse_tactics(toks, span).map_err(|e| ElabError::new(e.span, e.msg))?
-            }
+            Some(toks) => apex_syntax::parse_tactics(toks, span, &self.tables.notations)
+                .map_err(|e| ElabError::new(e.span, e.msg))?,
             None => vec![Tactic {
                 kind: TacticKind::Omega,
                 span,

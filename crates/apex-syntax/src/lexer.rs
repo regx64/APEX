@@ -59,6 +59,8 @@ pub enum TokenKind {
     Gt,
     Bar,
     Hash,
+    /// A user-declared operator (`infixl 65 "+++" => f;`).
+    Op(String),
     Underscore,
     Eof,
 }
@@ -101,9 +103,38 @@ fn keyword(s: &str) -> Option<TokenKind> {
 }
 
 /// Tokenize `src`. The result always ends with an `Eof` token.
+/// The operators a file declares with `infixl`/`infixr`/`infix`/`prefix` (longest first).
+fn declared_ops(src: &str) -> Vec<String> {
+    let mut ops = Vec::new();
+    for line in src.lines() {
+        let t = line.trim_start();
+        let Some(rest) = ["infixl ", "infixr ", "infix ", "prefix "]
+            .iter()
+            .find_map(|k| t.strip_prefix(k))
+        else {
+            continue;
+        };
+        let rest = rest
+            .trim_start()
+            .trim_start_matches(|c: char| c.is_ascii_digit());
+        let rest = rest.trim_start();
+        if let Some(q) = rest.strip_prefix('"') {
+            if let Some(end) = q.find('"') {
+                if end > 0 {
+                    ops.push(q[..end].to_string());
+                }
+            }
+        }
+    }
+    ops.sort_by_key(|o| std::cmp::Reverse(o.len()));
+    ops.dedup();
+    ops
+}
+
 pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
     use TokenKind::*;
     let b = src.as_bytes();
+    let ops = declared_ops(src);
     let mut i = 0;
     let mut out = Vec::new();
     while i < b.len() {
@@ -143,6 +174,15 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                     }
                 }
             }
+            continue;
+        }
+        // a declared operator wins over the built-in tokens
+        if let Some(op) = ops.iter().find(|o| src[i..].starts_with(o.as_str())) {
+            i += op.len();
+            out.push(Token {
+                kind: Op(op.clone()),
+                span: Span::new(start, i),
+            });
             continue;
         }
         let kind = if c.is_ascii_digit() {
@@ -326,6 +366,7 @@ impl std::fmt::Display for TokenKind {
             Gt => "`>`",
             Bar => "`|`",
             Hash => "`#`",
+            Op(o) => return write!(f, "`{o}`"),
             Underscore => "`_`",
         };
         f.write_str(s)

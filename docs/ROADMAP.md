@@ -23,7 +23,7 @@
 - [ ] B-5 강제 변환, 암시 람다, 서브타입/`Σ`/`∃` 표기
 
 ## C. 메타프로그래밍
-- [ ] C-1 확장 가능한 문법 (`syntax`/`macro`/`notation`)
+- [x] C-1 사용자 정의 문법: `infixl|infixr|infix N "op" => f;`, `prefix N "op" => f;`(연산자는 렉서가 선언을 보고 토큰화, 우선순위는 Lean 숫자를 결합력으로 변환), `macro name(a, b) => 템플릿;`(구문 치환, 위생적이지 않음). 탭틱 블록 안에서도 동작. 구문 범주/`syntax`/`macro_rules` 패턴/`elab`은 아직(C-2)
 - [ ] C-2 `MetaM`/`TacticM`, `elab`; 탭틱을 APEX 자신으로 재작성 (부트스트랩)
 
 ## D. 자동화

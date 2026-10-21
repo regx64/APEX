@@ -26,12 +26,13 @@ pub fn parse(src: &str) -> PResult<Module> {
         toks,
         pos: 0,
         ty_mode: false,
+        nt: Notations::default(),
     }
     .module()
 }
 
 /// Parse the tokens of a `by { ... }` block (without the braces).
-pub fn parse_tactics(toks: &[Token], end: Span) -> PResult<Vec<Tactic>> {
+pub fn parse_tactics(toks: &[Token], end: Span, nt: &Notations) -> PResult<Vec<Tactic>> {
     let mut toks = toks.to_vec();
     toks.push(Token {
         kind: T::Eof,
@@ -41,6 +42,7 @@ pub fn parse_tactics(toks: &[Token], end: Span) -> PResult<Vec<Tactic>> {
         toks,
         pos: 0,
         ty_mode: false,
+        nt: nt.clone(),
     };
     let v = p.tactic_seq()?;
     if *p.peek() != T::Eof {
@@ -86,11 +88,15 @@ struct Parser {
     toks: Vec<Token>,
     pos: usize,
     ty_mode: bool,
+    /// Operators and macros declared so far.
+    nt: Notations,
 }
 
 enum Infix {
     Arrow,
     Bin(BinOp),
+    /// A declared operator: calls the named function.
+    Custom(String),
 }
 
 impl Parser {
@@ -368,7 +374,10 @@ impl Parser {
         while *self.peek() != T::Eof {
             items.push(self.item()?);
         }
-        Ok(Module { items })
+        Ok(Module {
+            items,
+            notations: self.nt.clone(),
+        })
     }
 
     fn item(&mut self) -> PResult<Item> {
@@ -409,7 +418,16 @@ impl Parser {
             T::Ident(w)
                 if matches!(
                     w.as_str(),
-                    "namespace" | "open" | "section" | "variable" | "import"
+                    "namespace"
+                        | "open"
+                        | "section"
+                        | "variable"
+                        | "import"
+                        | "infixl"
+                        | "infixr"
+                        | "infix"
+                        | "prefix"
+                        | "macro"
                 ) =>
             {
                 Some(w.clone())
@@ -432,6 +450,59 @@ impl Parser {
                     ItemKind::Open(name)
                 }
                 "section" => ItemKind::Section(self.item_block()?),
+                "infixl" | "infixr" | "infix" | "prefix" => {
+                    let prec = match self.peek().clone() {
+                        T::Nat(n) => {
+                            self.bump();
+                            n
+                        }
+                        _ => 65,
+                    };
+                    let op = match self.peek().clone() {
+                        T::Str(s) => {
+                            self.bump();
+                            s
+                        }
+                        other => {
+                            return self
+                                .err(format!("expected the operator in quotes, found {other}"))
+                        }
+                    };
+                    self.expect(&T::FatArrow)?;
+                    let func = self.dotted_name()?;
+                    self.eat(&T::Semi);
+                    // Lean-style precedence numbers (`=` 50, `+` 65, `*` 70) to our binding powers
+                    let lbp = match prec {
+                        0..=50 => 4,
+                        51..=65 => 6,
+                        66..=70 => 8,
+                        71..=80 => 10,
+                        _ => 12,
+                    };
+                    if w == "prefix" {
+                        self.nt.prefix.insert(op.clone(), (lbp, func));
+                    } else {
+                        self.nt.infix.insert(op.clone(), (lbp, w == "infixr", func));
+                    }
+                    ItemKind::Notation(format!("{w} {prec} \"{op}\""))
+                }
+                "macro" => {
+                    let name = self.ident()?.name;
+                    self.expect(&T::LParen)?;
+                    let mut params = Vec::new();
+                    while *self.peek() != T::RParen {
+                        params.push(self.ident()?.name);
+                        if !self.eat(&T::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&T::RParen)?;
+                    self.expect(&T::FatArrow)?;
+                    let body = self.expr()?;
+                    self.eat(&T::Semi);
+                    self.nt.macros.insert(name.clone(), (params, body));
+                    ItemKind::Notation(format!("macro {name}"))
+                }
                 "import" => {
                     let name = self.dotted_name()?;
                     self.eat(&T::Semi);
@@ -929,6 +1000,14 @@ impl Parser {
             T::Star => (8, 9, Infix::Bin(BinOp::Mul)),
             T::Slash => (8, 9, Infix::Bin(BinOp::Div)),
             T::Percent => (8, 9, Infix::Bin(BinOp::Rem)),
+            T::Op(o) => {
+                let (lbp, right, f) = self.nt.infix.get(o)?;
+                (
+                    *lbp,
+                    if *right { *lbp } else { lbp + 1 },
+                    Infix::Custom(f.clone()),
+                )
+            }
             _ => return None,
         })
     }
@@ -945,6 +1024,13 @@ impl Parser {
             let kind = match op {
                 Infix::Arrow => ExprKind::Arrow(Box::new(lhs), Box::new(rhs)),
                 Infix::Bin(b) => ExprKind::Binary(b, Box::new(lhs), Box::new(rhs)),
+                Infix::Custom(f) => ExprKind::Call(
+                    Box::new(Expr {
+                        kind: ExprKind::Var(f),
+                        span: lhs.span,
+                    }),
+                    vec![lhs, rhs],
+                ),
             };
             lhs = Expr { kind, span };
         }
@@ -977,6 +1063,21 @@ impl Parser {
                         params,
                         body: Box::new(body),
                     },
+                })
+            }
+            T::Op(o) if self.nt.prefix.contains_key(o) => {
+                let (bp, f) = self.nt.prefix[o].clone();
+                self.bump();
+                let inner = self.expr_bp(bp)?;
+                Ok(Expr {
+                    span: start.to(inner.span),
+                    kind: ExprKind::Call(
+                        Box::new(Expr {
+                            kind: ExprKind::Var(f),
+                            span: start,
+                        }),
+                        vec![inner],
+                    ),
                 })
             }
             T::Star => {
@@ -1029,8 +1130,22 @@ impl Parser {
                     self.bump();
                     let args = self.with_mode(false, |p| p.comma_list(&T::RParen))?;
                     let end = self.expect(&T::RParen)?;
+                    let span = e.span.to(end);
+                    // a macro call is replaced by its template with the arguments substituted
+                    if let ExprKind::Var(name) = &e.kind {
+                        if let Some((params, body)) = self.nt.macros.get(name) {
+                            if params.len() == args.len() {
+                                let map: std::collections::HashMap<&str, &Expr> =
+                                    params.iter().map(|p| p.as_str()).zip(args.iter()).collect();
+                                let mut expanded = crate::subst::subst_expr(body, &map);
+                                expanded.span = span;
+                                e = expanded;
+                                continue;
+                            }
+                        }
+                    }
                     e = Expr {
-                        span: e.span.to(end),
+                        span,
                         kind: ExprKind::Call(Box::new(e), args),
                     };
                 }
@@ -1282,7 +1397,7 @@ mod tests {
     fn tactics(src: &str) -> Vec<Tactic> {
         let toks = lex(src).unwrap();
         let toks = &toks[..toks.len() - 1]; // drop Eof
-        parse_tactics(toks, Span::new(0, 0)).unwrap()
+        parse_tactics(toks, Span::new(0, 0), &Notations::default()).unwrap()
     }
 
     #[test]
@@ -1316,7 +1431,7 @@ mod tests {
     fn tactic_errors() {
         let toks = lex("frobnicate").unwrap();
         let toks = &toks[..toks.len() - 1];
-        let e = parse_tactics(toks, Span::new(0, 0)).unwrap_err();
+        let e = parse_tactics(toks, Span::new(0, 0), &Notations::default()).unwrap_err();
         assert!(e.msg.contains("expected a tactic"));
     }
 
