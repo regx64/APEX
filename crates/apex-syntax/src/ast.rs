@@ -148,12 +148,19 @@ pub struct Arm {
     pub body: Expr,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LamParam {
+    pub name: Ident,
+    pub ty: Option<Expr>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinOp {
     Add,
     Sub,
     Mul,
     Div,
+    Rem,
     /// Propositional equality `=`.
     Eq,
     /// Boolean equality `==`.
@@ -191,6 +198,19 @@ pub enum ExprKind {
     Block(Block),
     /// `do { .. }`: a sequence of monadic actions.
     Do(Block),
+    /// `[a, b, c]`
+    List(Vec<Expr>),
+    /// `|x, y: T| body`
+    Lambda {
+        params: Vec<LamParam>,
+        body: Box<Expr>,
+    },
+    /// `for x in xs { .. }` (inside `do`)
+    For {
+        var: Ident,
+        iter: Box<Expr>,
+        body: Block,
+    },
     If(Box<Expr>, Block, Option<Box<Expr>>),
     Match(Box<Expr>, Vec<Arm>),
 }

@@ -247,6 +247,14 @@ impl<'a> Evaluator<'a> {
                     let (a, b) = (self.force_nat(&args[0])?, self.force_nat(&args[1])?);
                     Ok(Value::Nat(a.saturating_sub(b)))
                 }
+                "nat_div" => {
+                    let (a, b) = (self.force_nat(&args[0])?, self.force_nat(&args[1])?);
+                    Ok(Value::Nat(a.checked_div(b).unwrap_or(0)))
+                }
+                "nat_rem" => {
+                    let (a, b) = (self.force_nat(&args[0])?, self.force_nat(&args[1])?);
+                    Ok(Value::Nat(a.checked_rem(b).unwrap_or(a)))
+                }
                 "nat_beq" | "nat_lt" => {
                     let (a, b) = (self.force_nat(&args[0])?, self.force_nat(&args[1])?);
                     let r = if &*info.name == "nat_beq" {
@@ -355,7 +363,7 @@ impl<'a> Evaluator<'a> {
             "Nat.add" => fun(Kind::NatAdd, 2),
             "Nat.mul" => fun(Kind::NatMul, 2),
             // native versions of prelude definitions (same behavior, faster)
-            "nat_sub" | "nat_beq" | "nat_lt" => fun(Kind::Prim, 2),
+            "nat_sub" | "nat_beq" | "nat_lt" | "nat_div" | "nat_rem" => fun(Kind::Prim, 2),
             "String.append" => fun(Kind::Prim, 2),
             "Nat.toString" => fun(Kind::Prim, 1),
             "IO.pure" => fun(Kind::Prim, 2),

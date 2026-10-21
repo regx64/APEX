@@ -209,15 +209,23 @@ pub fn contains_const(t: &T, name: &str) -> bool {
     }
 }
 
-/// Does `t` contain any bound-variable occurrence?
-pub fn has_bvar(t: &T) -> bool {
-    match &**t {
-        Term::BVar(_) => true,
-        Term::App(f, a) => has_bvar(f) || has_bvar(a),
-        Term::Lam(_, ty, b) | Term::Pi(_, ty, b) => has_bvar(ty) || has_bvar(b),
-        Term::Let(_, ty, v, b) => has_bvar(ty) || has_bvar(v) || has_bvar(b),
-        _ => false,
+/// Does `t` have a bound variable that refers outside of `t`?
+pub fn has_loose_bvar(t: &T) -> bool {
+    fn go(t: &T, depth: u32) -> bool {
+        match &**t {
+            Term::BVar(i) => *i >= depth,
+            Term::App(f, a) => go(f, depth) || go(a, depth),
+            Term::Lam(_, ty, b) | Term::Pi(_, ty, b) => go(ty, depth) || go(b, depth + 1),
+            Term::Let(_, ty, v, b) => go(ty, depth) || go(v, depth) || go(b, depth + 1),
+            _ => false,
+        }
     }
+    go(t, 0)
+}
+
+/// Kept for callers that only need a conservative answer.
+pub fn has_bvar(t: &T) -> bool {
+    has_loose_bvar(t)
 }
 
 /// Does `t` mention any free variable?

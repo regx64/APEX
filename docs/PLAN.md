@@ -32,5 +32,5 @@ apex-span, apex-syntax, apex-kernel, apex-elab, apex-tactic, apex-mir, apex-borr
 4. 범위 폭주 → M4까지를 먼저 완성
 
 ## 진행 상황
-- M0, M1 완료. M2 커널 완료 (docs/KERNEL.md). M3a/M3b-1 완료: 엘라보레이터, match, 구조적 재귀 (docs/ELAB.md). M4 완료: 소거 + 지연 인터프리터, `apex run` (docs/EVAL.md). M4b 완료: String, IO, do 표기법, Hello World. M3c 완료: 트레잇, impl, 경계, 메서드 호출, 연산자 오버로딩. 다음: M5 (소유권, 빌림 검사)
+- M0, M1 완료. M2 커널 완료 (docs/KERNEL.md). M3a/M3b-1 완료: 엘라보레이터, match, 구조적 재귀 (docs/ELAB.md). M4 완료: 소거 + 지연 인터프리터, `apex run` (docs/EVAL.md). M4b 완료: String, IO, do 표기법, Hello World. M3c 완료: 트레잇, impl, 경계, 메서드 호출, 연산자 오버로딩. 기반 정리 완료: 클로저, 리스트, for, 나눗셈, 메서드 제네릭, 기본 메서드, 이름 가리기. 다음: M5 (소유권, 빌림 검사)
 - M1 한계: 에러 복구 없음(첫 오류에서 중단), `apex fmt` 미구현

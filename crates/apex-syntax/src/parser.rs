@@ -476,6 +476,7 @@ impl Parser {
             T::Minus => (6, 7, Infix::Bin(BinOp::Sub)),
             T::Star => (8, 9, Infix::Bin(BinOp::Mul)),
             T::Slash => (8, 9, Infix::Bin(BinOp::Div)),
+            T::Percent => (8, 9, Infix::Bin(BinOp::Rem)),
             _ => return None,
         })
     }
@@ -501,6 +502,31 @@ impl Parser {
     fn prefix(&mut self) -> PResult<Expr> {
         let start = self.span();
         match self.peek() {
+            T::Bar => {
+                self.bump();
+                let mut params = Vec::new();
+                while *self.peek() != T::Bar {
+                    let name = self.ident()?;
+                    let ty = if self.eat(&T::Colon) {
+                        Some(self.ty()?)
+                    } else {
+                        None
+                    };
+                    params.push(LamParam { name, ty });
+                    if !self.eat(&T::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&T::Bar)?;
+                let body = self.expr()?;
+                Ok(Expr {
+                    span: start.to(body.span),
+                    kind: ExprKind::Lambda {
+                        params,
+                        body: Box::new(body),
+                    },
+                })
+            }
             T::Minus => {
                 self.bump();
                 let inner = self.expr_bp(10)?;
@@ -621,6 +647,24 @@ impl Parser {
                 self.bump();
                 ExprKind::Do(self.block()?)
             }
+            T::LBracket => {
+                self.bump();
+                let items = self.with_mode(false, |p| p.comma_list(&T::RBracket))?;
+                self.expect(&T::RBracket)?;
+                ExprKind::List(items)
+            }
+            T::For => {
+                self.bump();
+                let var = self.ident()?;
+                self.expect(&T::In)?;
+                let iter = self.expr()?;
+                let body = self.block()?;
+                ExprKind::For {
+                    var,
+                    iter: Box::new(iter),
+                    body,
+                }
+            }
             T::If => {
                 self.bump();
                 let cond = self.expr()?;
@@ -673,7 +717,11 @@ impl Parser {
 fn is_block_like(e: &Expr) -> bool {
     matches!(
         e.kind,
-        ExprKind::Block(_) | ExprKind::If(..) | ExprKind::Match(..)
+        ExprKind::Block(_)
+            | ExprKind::Do(_)
+            | ExprKind::For { .. }
+            | ExprKind::If(..)
+            | ExprKind::Match(..)
     )
 }
 
@@ -758,5 +806,53 @@ mod tests {
         assert!(err("let x").contains("expected an item"));
         assert!(err("fn f( {").contains("expected identifier"));
         assert!(err("theorem t(): P := by { ").contains("unclosed"));
+    }
+}
+
+#[cfg(test)]
+mod loop_and_list_tests {
+    use super::*;
+
+    #[test]
+    fn list_literals_for_loops_and_remainder() {
+        let m =
+            parse("fn f() -> Nat { let xs := [1, 2, 3]; for x in xs { print(x) } 7 % 2 }").unwrap();
+        let ItemKind::Fn(f) = &m.items[0].kind else {
+            panic!()
+        };
+        let body = f.body.as_ref().unwrap();
+        assert!(
+            matches!(&body.stmts[0], Stmt::Let { init, .. } if matches!(init.kind, ExprKind::List(ref v) if v.len() == 3))
+        );
+        // a `for` loop is block-like: no `;` needed before the next expression
+        assert!(matches!(&body.stmts[1], Stmt::Expr(e) if matches!(e.kind, ExprKind::For { .. })));
+        assert!(matches!(
+            body.tail.as_ref().unwrap().kind,
+            ExprKind::Binary(BinOp::Rem, ..)
+        ));
+        // `for` still works as the keyword in `impl Trait for Type`
+        assert!(parse("impl Show for Nat { fn show(&self) -> String { \"n\" } }").is_ok());
+        assert!(parse("fn f() { [] }").is_ok());
+    }
+
+    #[test]
+    fn closures() {
+        let m = parse("fn f() { let g := |x, y: Nat| x + y; let h := || 1; g }").unwrap();
+        let ItemKind::Fn(f) = &m.items[0].kind else {
+            panic!()
+        };
+        let body = f.body.as_ref().unwrap();
+        let Stmt::Let { init, .. } = &body.stmts[0] else {
+            panic!()
+        };
+        let ExprKind::Lambda { params, .. } = &init.kind else {
+            panic!()
+        };
+        assert_eq!(params.len(), 2);
+        assert!(params[0].ty.is_none() && params[1].ty.is_some());
+        let Stmt::Let { init, .. } = &body.stmts[1] else {
+            panic!()
+        };
+        assert!(matches!(&init.kind, ExprKind::Lambda { params, .. } if params.is_empty()));
     }
 }

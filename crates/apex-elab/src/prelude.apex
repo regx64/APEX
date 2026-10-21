@@ -60,11 +60,31 @@ fn nat_lt(a: Nat, b: Nat) -> Bool {
     }
 }
 
+// Division by repeated subtraction, with the dividend as fuel (each step removes at
+// least one, so `a + 1` steps always suffice). Division by zero is zero, and
+// `a % 0` is `a`, as in Lean.
+fn nat_div_aux(fuel: Nat, a: Nat, b: Nat) -> Nat {
+    match fuel {
+        0 => 0,
+        Nat.succ(f) => if nat_lt(a, b) { 0 } else { Nat.succ(nat_div_aux(f, nat_sub(a, b), b)) },
+    }
+}
+
+fn nat_div(a: Nat, b: Nat) -> Nat {
+    if nat_is_zero(b) { 0 } else { nat_div_aux(Nat.succ(a), a, b) }
+}
+
+fn nat_rem(a: Nat, b: Nat) -> Nat {
+    if nat_is_zero(b) { a } else { nat_sub(a, Nat.mul(nat_div(a, b), b)) }
+}
+
 // ---- operator traits ----
 
 trait Add { fn add(self, other: Self) -> Self; }
 trait Sub { fn sub(self, other: Self) -> Self; }
 trait Mul { fn mul(self, other: Self) -> Self; }
+trait Div { fn div(self, other: Self) -> Self; }
+trait Rem { fn rem(self, other: Self) -> Self; }
 trait BEq { fn beq(self, other: Self) -> Bool; }
 trait Ord { fn lt(self, other: Self) -> Bool; }
 trait Show { fn show(&self) -> String; }
@@ -72,6 +92,8 @@ trait Show { fn show(&self) -> String; }
 impl Add for Nat { fn add(self, other: Self) -> Self { Nat.add(self, other) } }
 impl Sub for Nat { fn sub(self, other: Self) -> Self { nat_sub(self, other) } }
 impl Mul for Nat { fn mul(self, other: Self) -> Self { Nat.mul(self, other) } }
+impl Div for Nat { fn div(self, other: Self) -> Self { nat_div(self, other) } }
+impl Rem for Nat { fn rem(self, other: Self) -> Self { nat_rem(self, other) } }
 impl BEq for Nat { fn beq(self, other: Self) -> Bool { nat_beq(self, other) } }
 impl Ord for Nat { fn lt(self, other: Self) -> Bool { nat_lt(self, other) } }
 impl Add for String { fn add(self, other: Self) -> Self { String.append(self, other) } }
@@ -102,3 +124,95 @@ impl Show for Bool {
 
 /// Print any `Show` value followed by a newline.
 fn display<T: Show>(x: T) -> IO<Unit> { println(x.show()) }
+
+// ---- lists ----
+
+fn range_from(start: Nat, count: Nat) -> List<Nat> {
+    match count {
+        0 => List.nil,
+        Nat.succ(c) => List.cons(start, range_from(Nat.succ(start), c)),
+    }
+}
+
+/// `range(n)` is `[0, 1, .., n - 1]`.
+fn range(n: Nat) -> List<Nat> { range_from(0, n) }
+
+fn list_len<T>(xs: List<T>) -> Nat {
+    match xs {
+        List.nil => 0,
+        List.cons(_, rest) => 1 + list_len(rest),
+    }
+}
+
+fn list_append<T>(xs: List<T>, ys: List<T>) -> List<T> {
+    match xs {
+        List.nil => ys,
+        List.cons(x, rest) => List.cons(x, list_append(rest, ys)),
+    }
+}
+
+fn list_map<A, B>(xs: List<A>, f: A -> B) -> List<B> {
+    match xs {
+        List.nil => List.nil,
+        List.cons(x, rest) => List.cons(f(x), list_map(rest, f)),
+    }
+}
+
+fn list_filter<A>(xs: List<A>, keep: A -> Bool) -> List<A> {
+    match xs {
+        List.nil => List.nil,
+        List.cons(x, rest) => if keep(x) {
+            List.cons(x, list_filter(rest, keep))
+        } else {
+            list_filter(rest, keep)
+        },
+    }
+}
+
+fn list_foldl<A, B>(xs: List<A>, init: B, f: B -> A -> B) -> B {
+    match xs {
+        List.nil => init,
+        List.cons(x, rest) => list_foldl(rest, f(init, x), f),
+    }
+}
+
+fn list_sum(xs: List<Nat>) -> Nat {
+    match xs {
+        List.nil => 0,
+        List.cons(x, rest) => x + list_sum(rest),
+    }
+}
+
+fn list_reverse_onto<T>(xs: List<T>, acc: List<T>) -> List<T> {
+    match xs {
+        List.nil => acc,
+        List.cons(x, rest) => list_reverse_onto(rest, List.cons(x, acc)),
+    }
+}
+
+fn list_reverse<T>(xs: List<T>) -> List<T> { list_reverse_onto(xs, List.nil) }
+
+/// The loop behind `for x in xs { .. }`.
+fn for_each<T>(xs: List<T>, f: T -> IO<Unit>) -> IO<Unit> {
+    match xs {
+        List.nil => pure(()),
+        List.cons(x, rest) => do {
+            f(x);
+            for_each(rest, f)
+        },
+    }
+}
+
+fn list_items<T: Show>(xs: List<T>) -> String {
+    match xs {
+        List.nil => "",
+        List.cons(x, rest) => match rest {
+            List.nil => x.show(),
+            _ => String.append(x.show(), String.append(", ", list_items(rest))),
+        },
+    }
+}
+
+impl<T: Show> Show for List<T> {
+    fn show(&self) -> String { String.append("[", String.append(list_items(self), "]")) }
+}

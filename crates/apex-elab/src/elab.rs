@@ -62,6 +62,9 @@ struct Tables {
     insts: HashMap<String, Vec<String>>,
     /// method name -> traits declaring it
     methods: HashMap<String, Vec<String>>,
+    /// A user definition that shares a name with a prelude one is stored under a
+    /// different kernel name; this maps the source name to it.
+    shadow: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -69,7 +72,25 @@ struct TraitInfo {
     /// number of class parameters, `Self` included
     nparams: usize,
     methods: Vec<String>,
+    /// names of the trait's own type parameters (after `Self`)
+    generics: Vec<String>,
+    /// methods that have a default body
+    defaults: HashMap<String, FnDecl>,
 }
+
+/// An impl under construction: sibling methods already built can be used by
+/// later methods, but the impl cannot be used as a whole until it is finished.
+struct Pending {
+    trait_name: String,
+    class_args: Vec<T>,
+    built: Vec<Option<T>>,
+    /// placeholders for methods not built yet
+    holes: Vec<u32>,
+    methods: Vec<String>,
+}
+
+/// Marker in the error raised when a method needs one that is not built yet.
+const NOT_BUILT: &str = "is used before it is defined";
 
 pub struct Elaborator {
     env: Env,
@@ -77,6 +98,9 @@ pub struct Elaborator {
     aliases: Aliases,
     tables: Tables,
     inst_counter: usize,
+    /// set once the prelude is loaded: later definitions may shadow prelude names
+    prelude_loaded: bool,
+    user_defs: std::collections::HashSet<String>,
 }
 
 impl Default for Elaborator {
@@ -94,6 +118,9 @@ impl Elaborator {
         masks.insert("Eq".into(), vec![Bk::Imp, Bk::Exp, Bk::Exp]);
         masks.insert("Eq.refl".into(), vec![Bk::Imp, Bk::Exp]);
         masks.insert("IO.pure".into(), vec![Bk::Imp, Bk::Exp]);
+        masks.insert("List".into(), vec![Bk::Exp]);
+        masks.insert("List.nil".into(), vec![Bk::Imp]);
+        masks.insert("List.cons".into(), vec![Bk::Imp, Bk::Exp, Bk::Exp]);
         masks.insert("IO.bind".into(), vec![Bk::Imp, Bk::Imp, Bk::Exp, Bk::Exp]);
         let mut aliases = Aliases::new();
         aliases.insert("true".into(), "Bool.true".into());
@@ -106,10 +133,19 @@ impl Elaborator {
             aliases,
             tables: Tables::default(),
             inst_counter: 0,
+            prelude_loaded: false,
+            user_defs: Default::default(),
         };
-        let module = apex_syntax::parse(include_str!("prelude.apex")).expect("prelude must parse");
-        el.elab_module(&module)
-            .unwrap_or_else(|e| panic!("prelude must elaborate: {}", e.msg));
+        let src = include_str!("prelude.apex");
+        let module = apex_syntax::parse(src).expect("prelude must parse");
+        el.elab_module(&module).unwrap_or_else(|e| {
+            let (line, _) = e.span.line_col(src);
+            panic!(
+                "prelude must elaborate: {} (prelude.apex line {line})",
+                e.msg
+            )
+        });
+        el.prelude_loaded = true;
         el
     }
 
@@ -140,8 +176,20 @@ impl Elaborator {
     }
 
     fn add_def(&mut self, name: &Ident, ty: T, val: T, mask: Vec<Bk>) -> R<()> {
-        from_kernel(self.env.add_def(&name.name, &[], ty, val), name.span)?;
-        self.masks.insert(name.name.clone(), mask);
+        // a user definition may shadow a prelude one; it then lives under another kernel name
+        let mut kname = name.name.clone();
+        if self.prelude_loaded {
+            if self.user_defs.contains(&name.name) {
+                return err(name.span, format!("`{}` is already declared", name.name));
+            }
+            if self.env.get(&name.name).is_some() {
+                kname = format!("{}'user", name.name);
+                self.tables.shadow.insert(name.name.clone(), kname.clone());
+            }
+            self.user_defs.insert(name.name.clone());
+        }
+        from_kernel(self.env.add_def(&kname, &[], ty, val), name.span)?;
+        self.masks.insert(kname, mask);
         Ok(())
     }
 
@@ -218,6 +266,7 @@ impl Elaborator {
                 decr: d,
                 explicit,
                 fields: HashMap::new(),
+                refined: Vec::new(),
                 in_top: false,
             });
         }
@@ -255,8 +304,8 @@ impl Elaborator {
         self.add_def(&t.name, ty, val, mask)
     }
 
-    /// Elaborate the inductive type former's type: `Π params, Type`.
-    fn ind_type(&self, generics: &[Generic], span: Span) -> R<T> {
+    /// The type of an inductive type former: `Π params, Sort level`.
+    fn ind_type(&self, generics: &[Generic], level: u32, span: Span) -> R<T> {
         let mut cx = self.cx();
         let (pfv, _) = cx.elab_binders(generics, &[])?;
         let declared = generics
@@ -269,7 +318,7 @@ impl Elaborator {
                 "trait bounds on type declarations are not supported yet",
             );
         }
-        cx.close(&pfv, &sort(Level::of_nat(1)), true, span)
+        cx.close(&pfv, &sort(Level::of_nat(level)), true, span)
     }
 
     fn register_inductive(&mut self, decl: InductiveDecl, nparams: usize, span: Span) -> R<()> {
@@ -292,7 +341,7 @@ impl Elaborator {
     }
 
     fn elab_enum(&mut self, d: &EnumDecl, span: Span) -> R<()> {
-        let ind_ty = self.ind_type(&d.generics, span)?;
+        let ind_ty = self.ind_type(&d.generics, 1, span)?;
         let name = d.name.name.clone();
         // scratch environment in which the type is visible, for recursive fields
         let mut scratch = self.env.clone();
@@ -334,7 +383,7 @@ impl Elaborator {
     }
 
     fn elab_struct(&mut self, d: &StructDecl, span: Span) -> R<()> {
-        let ind_ty = self.ind_type(&d.generics, span)?;
+        let ind_ty = self.ind_type(&d.generics, 1, span)?;
         let name = d.name.name.clone();
         let nparams = d
             .generics
@@ -382,7 +431,7 @@ impl Elaborator {
         last: Bk,
         mk_tele: &dyn Fn(&mut Cx<'_>) -> R<StructTele>,
     ) -> R<()> {
-        let (ty, val) = {
+        let (ty, val, extra) = {
             let mut cx = self.cx();
             let tele = mk_tele(&mut cx)?;
             let fty = tele.field_tys[j].clone();
@@ -403,9 +452,11 @@ impl Elaborator {
             args.extend([motive, minor, fvar(s)]);
             let body = mk_apps(&rec, &args);
             let binders: Vec<u32> = tele.params.iter().copied().chain([s]).collect();
+            let extra = tele.field_masks.get(j).cloned().unwrap_or_default();
             (
                 cx.close(&binders, &fty, true, fname.span)?,
                 cx.close(&binders, &body, false, fname.span)?,
+                extra,
             )
         };
         let pname = Ident {
@@ -414,6 +465,7 @@ impl Elaborator {
         };
         let mut mask = vec![Bk::Imp; nparams];
         mask.push(last);
+        mask.extend(extra);
         self.add_def(&pname, ty, val, mask)
     }
 
@@ -427,17 +479,13 @@ impl Elaborator {
         if self.env.get(&name).is_some() {
             return err(d.name.span, format!("`{name}` is already declared"));
         }
-        for m in &d.fns {
-            if m.generics.iter().any(|g| !g.name.name.starts_with('\'')) {
-                return err(
-                    m.name.span,
-                    "methods with their own generic parameters are not supported yet",
-                );
-            }
-            if m.body.is_some() {
-                return err(m.name.span, "default method bodies are not supported yet");
-            }
-        }
+        // a method with its own type parameters makes the field a `Π (B : Type), ..`,
+        // which lives one universe higher
+        let generic_methods = d
+            .fns
+            .iter()
+            .any(|m| m.generics.iter().any(|g| !g.name.name.starts_with('\'')));
+        let level = if generic_methods { 2 } else { 1 };
         let mut gens = vec![Generic {
             name: Ident {
                 name: "Self".into(),
@@ -450,7 +498,7 @@ impl Elaborator {
             .iter()
             .filter(|g| !g.name.name.starts_with('\''))
             .count();
-        let ind_ty = self.ind_type(&gens, span)?;
+        let ind_ty = self.ind_type(&gens, level, span)?;
         let mut scratch = self.env.clone();
         from_kernel(scratch.add_axiom(&name, &[], ind_ty.clone()), d.name.span)?;
         let ctor_ty = {
@@ -484,9 +532,23 @@ impl Elaborator {
                 .or_default()
                 .push(name.clone());
         }
-        self.tables
-            .traits
-            .insert(name, TraitInfo { nparams, methods });
+        let info = TraitInfo {
+            nparams,
+            methods,
+            generics: d
+                .generics
+                .iter()
+                .filter(|g| !g.name.name.starts_with('\''))
+                .map(|g| g.name.name.clone())
+                .collect(),
+            defaults: d
+                .fns
+                .iter()
+                .filter(|m| m.body.is_some())
+                .map(|m| (m.name.name.clone(), m.clone()))
+                .collect(),
+        };
+        self.tables.traits.insert(name, info);
         Ok(())
     }
 
@@ -499,6 +561,10 @@ impl Elaborator {
 
     /// `impl<G> Trait<A> for Ty { fn .. }` becomes a definition
     /// `inst : Π G, Trait Ty A := Trait.mk Ty A (method terms)`.
+    ///
+    /// Methods are built one at a time; a method may use the ones built before it
+    /// (through a provisional dictionary whose unbuilt fields are placeholders).
+    /// Methods the impl omits take the trait's default body.
     fn elab_trait_impl(&mut self, d: &ImplDecl, tr: &Expr, span: Span) -> R<()> {
         let (trait_name, ty, val, mask) = {
             let mut cx = self.cx();
@@ -526,22 +592,18 @@ impl Elaborator {
             let class_app = mk_apps(&cnst(tname.as_str().into(), vec![]), &class_args);
             let ctor = format!("{tname}.mk");
             let ctor_ty = from_kernel(self.env.const_type(&ctor, &[]), span)?;
+            // field types, with placeholders standing for the methods not built yet
             let mut cur = from_kernel(cx.tc.instantiate_pis(&ctor_ty, &class_args), span)?;
-            let mut terms = Vec::new();
+            let (mut doms, mut holes) = (Vec::new(), Vec::new());
             for mname in &info.methods {
                 let w = from_kernel(cx.tc.whnf(&cur), span)?;
                 let Term::Pi(_, dom, body) = &*w else {
                     return err(span, "internal error: malformed trait structure");
                 };
-                let Some(f) = d.fns.iter().find(|f| f.name.name == *mname) else {
-                    return err(
-                        span,
-                        format!("missing method `{mname}` in this impl of `{tname}`"),
-                    );
-                };
-                let term = cx.elab_method(f, dom)?;
-                cur = instantiate(body, &term);
-                terms.push(term);
+                let hole = cx.tc.fresh(&format!("<{mname}>"), dom.clone(), Mult::Omega);
+                doms.push(dom.clone());
+                holes.push(hole);
+                cur = instantiate(body, &fvar(hole));
             }
             if let Some(extra) = d.fns.iter().find(|f| !info.methods.contains(&f.name.name)) {
                 return err(
@@ -549,6 +611,80 @@ impl Elaborator {
                     format!("`{}` is not a method of `{tname}`", extra.name.name),
                 );
             }
+            let n = info.methods.len();
+            cx.pending = Some(Pending {
+                trait_name: tname.clone(),
+                class_args: class_args.clone(),
+                built: vec![None; n],
+                holes,
+                methods: info.methods.clone(),
+            });
+
+            // the methods the impl writes, retrying those that need a later sibling
+            let mut todo: Vec<usize> = (0..n)
+                .filter(|&i| d.fns.iter().any(|f| f.name.name == info.methods[i]))
+                .collect();
+            while !todo.is_empty() {
+                let mut progress = false;
+                let mut first_err = None;
+                for i in todo.clone() {
+                    let f = d
+                        .fns
+                        .iter()
+                        .find(|f| f.name.name == info.methods[i])
+                        .expect("present");
+                    let (depth, nlocal, ngoals) =
+                        (cx.scope.len(), cx.local_insts.len(), cx.goals.len());
+                    let snap = cx.tc.snapshot();
+                    match cx.elab_method(f, &doms[i]) {
+                        Ok(term) => {
+                            cx.pending.as_mut().expect("pending").built[i] = Some(term);
+                            todo.retain(|&j| j != i);
+                            progress = true;
+                        }
+                        Err(e) if e.msg.contains(NOT_BUILT) => {
+                            cx.scope.truncate(depth);
+                            cx.local_insts.truncate(nlocal);
+                            cx.goals.truncate(ngoals);
+                            cx.tc.restore(snap);
+                            first_err.get_or_insert(e);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                if !progress {
+                    return Err(first_err.expect("an error was recorded"));
+                }
+            }
+
+            // default bodies for the rest; they may name the trait's own parameters
+            let depth = cx.scope.len();
+            for (g, a) in info.generics.iter().zip(class_args.iter().skip(1)) {
+                cx.scope.push((g.clone(), a.clone()));
+            }
+            for (i, (mname, dom)) in info.methods.iter().zip(&doms).enumerate() {
+                if cx.pending.as_ref().expect("pending").built[i].is_some() {
+                    continue;
+                }
+                let Some(f) = info.defaults.get(mname) else {
+                    return err(
+                        span,
+                        format!("missing method `{mname}` in this impl of `{tname}`"),
+                    );
+                };
+                let term = cx.elab_method(f, dom)?;
+                cx.pending.as_mut().expect("pending").built[i] = Some(term);
+            }
+            cx.scope.truncate(depth);
+
+            let terms: Vec<T> = cx
+                .pending
+                .take()
+                .expect("pending")
+                .built
+                .into_iter()
+                .map(|t| t.expect("all methods built"))
+                .collect();
             let mut mk_args = class_args;
             mk_args.extend(terms);
             let value = mk_apps(&cnst(ctor.as_str().into(), vec![]), &mk_args);
@@ -651,6 +787,9 @@ struct RecCtx {
     explicit: Vec<u32>,
     /// Recursive fields of the top-level match on `decr`, with their induction hypotheses.
     fields: HashMap<u32, T>,
+    /// A field variable that a nested `match` replaced by a constructor
+    /// application, so recursive calls on it can still be recognized.
+    refined: Vec<(T, u32)>,
     in_top: bool,
 }
 
@@ -658,6 +797,8 @@ struct StructTele {
     params: Vec<u32>,
     fields: Vec<u32>,
     field_tys: Vec<T>,
+    /// Binder kinds of each field's own leading generics (trait methods only).
+    field_masks: Vec<Vec<Bk>>,
 }
 
 impl StructTele {
@@ -679,6 +820,7 @@ struct Cx<'a> {
     local_insts: Vec<T>,
     scope: Vec<(String, T)>,
     rec: Option<RecCtx>,
+    pending: Option<Pending>,
     /// Where each metavariable was created, for "cannot infer" errors.
     spans: HashMap<u32, Span>,
 }
@@ -703,6 +845,7 @@ impl<'a> Cx<'a> {
             local_insts: Vec::new(),
             scope: Vec::new(),
             rec: None,
+            pending: None,
             spans: HashMap::new(),
         }
     }
@@ -801,6 +944,7 @@ impl<'a> Cx<'a> {
             params,
             fields,
             field_tys,
+            field_masks: vec![],
         })
     }
 
@@ -829,6 +973,9 @@ impl<'a> Cx<'a> {
     fn resolve(&self, name: &str) -> Option<Res> {
         if let Some((_, t)) = self.scope.iter().rev().find(|(n, _)| n == name) {
             return Some(Res::Local(t.clone()));
+        }
+        if let Some(k) = self.tables.shadow.get(name) {
+            return Some(Res::Global(k.clone()));
         }
         if self.env.get(name).is_some() {
             return Some(Res::Global(name.to_string()));
@@ -940,9 +1087,8 @@ impl<'a> Cx<'a> {
                     BinOp::EqEq => ("BEq.beq", false),
                     BinOp::Lt => ("Ord.lt", false),
                     BinOp::Gt => ("Ord.lt", true),
-                    BinOp::Div => {
-                        return err(e.span, "division is not supported yet");
-                    }
+                    BinOp::Div => ("Div.div", false),
+                    BinOp::Rem => ("Rem.rem", false),
                 };
                 let head = self.const_term(name);
                 let args = if swap {
@@ -983,6 +1129,26 @@ impl<'a> Cx<'a> {
             }
             ExprKind::Block(b) => self.elab_block(b, exp),
             ExprKind::Do(b) => self.elab_do(b, exp, e.span),
+            ExprKind::For { var, iter, body } => self.elab_for(var, iter, body, e.span),
+            ExprKind::Lambda { params, body } => self.elab_lambda(params, body, exp, e.span),
+            ExprKind::List(items) => {
+                // [a, b] is List.cons(a, List.cons(b, List.nil))
+                let var = |n: &str, span| Expr {
+                    kind: ExprKind::Var(n.into()),
+                    span,
+                };
+                let mut list = var("List.nil", e.span);
+                for it in items.iter().rev() {
+                    list = Expr {
+                        kind: ExprKind::Call(
+                            Box::new(var("List.cons", it.span)),
+                            vec![it.clone(), list],
+                        ),
+                        span: e.span,
+                    };
+                }
+                self.elab(&list, exp)
+            }
             ExprKind::If(cond, then, els) => self.elab_if(cond, then, els.as_deref(), exp, e.span),
             // references are not tracked yet: `&x` elaborates as `x` (the borrow checker is M5)
             ExprKind::Ref { inner, .. } => self.elab(inner, exp),
@@ -1118,39 +1284,37 @@ impl<'a> Cx<'a> {
         let (params, _) = self.elab_binders(gens, &[])?;
         let mut fields = Vec::new();
         let mut field_tys = Vec::new();
+        let mut field_masks = Vec::new();
         for m in &d.fns {
-            let depth = self.scope.len();
-            let (pf, _) = self.elab_binders(&[], &m.params)?;
+            let (depth, nlocal) = (self.scope.len(), self.local_insts.len());
+            let (pf, mask) = self.elab_binders(&m.generics, &m.params)?;
             let ret = match &m.ret {
                 Some(t) => self.elab_type(t)?,
                 None => self.unit_type(),
             };
             let fty = self.close(&pf, &ret, true, m.name.span)?;
             self.scope.truncate(depth);
+            self.local_insts.truncate(nlocal);
             let id = self.tc.fresh(&m.name.name, fty.clone(), Mult::Omega);
             fields.push(id);
             field_tys.push(fty);
+            field_masks.push(mask);
         }
         Ok(StructTele {
             params,
             fields,
             field_tys,
+            field_masks,
         })
     }
 
     /// Elaborate an impl method as a term of type `expected`.
     fn elab_method(&mut self, f: &FnDecl, expected: &T) -> R<T> {
-        if f.generics.iter().any(|g| !g.name.name.starts_with('\'')) {
-            return err(
-                f.name.span,
-                "methods with their own generic parameters are not supported yet",
-            );
-        }
         let Some(block) = &f.body else {
             return err(f.name.span, "a method in an impl needs a body");
         };
-        let depth = self.scope.len();
-        let (pf, _) = self.elab_binders(&[], &f.params)?;
+        let (depth, nlocal) = (self.scope.len(), self.local_insts.len());
+        let (pf, _) = self.elab_binders(&f.generics, &f.params)?;
         let ret = match &f.ret {
             Some(t) => self.elab_type(t)?,
             None => self.unit_type(),
@@ -1171,6 +1335,21 @@ impl<'a> Cx<'a> {
         }
         let term = self.close(&pf, &body, false, f.name.span)?;
         self.scope.truncate(depth);
+        self.local_insts.truncate(nlocal);
+        // placeholders must not survive: they stand for methods not built yet
+        if let Some(p) = &self.pending {
+            for (j, &h) in p.holes.iter().enumerate() {
+                if contains_fvar(&term, h) {
+                    return err(
+                        f.name.span,
+                        format!(
+                            "method `{}` of this impl {NOT_BUILT} (an impl cannot refer to itself as a whole)",
+                            p.methods[j]
+                        ),
+                    );
+                }
+            }
+        }
         Ok(term)
     }
 
@@ -1221,6 +1400,26 @@ impl<'a> Cx<'a> {
         let Some(class) = self.class_of(&g) else {
             return Ok(None);
         };
+        // the impl being built: a dictionary of the methods built so far
+        if let Some(p) = &self.pending {
+            if p.trait_name == class {
+                let class_app = mk_apps(&cnst(class.as_str().into(), vec![]), &p.class_args);
+                let fields: Vec<T> = p
+                    .built
+                    .iter()
+                    .zip(&p.holes)
+                    .map(|(b, &h)| b.clone().unwrap_or_else(|| fvar(h)))
+                    .collect();
+                let mut args = p.class_args.clone();
+                args.extend(fields);
+                let dict = mk_apps(&cnst(format!("{class}.mk").as_str().into(), vec![]), &args);
+                let snap = self.tc.snapshot();
+                if from_kernel(self.tc.is_def_eq(&class_app, &g), span)? {
+                    return Ok(Some(dict));
+                }
+                self.tc.restore(snap);
+            }
+        }
         for li in self.local_insts.clone() {
             let lty = from_kernel(self.tc.infer(&li), span)?;
             let snap = self.tc.snapshot();
@@ -1401,9 +1600,12 @@ impl<'a> Cx<'a> {
                                 i.methods.iter().any(|m| m == mn).then_some(i.nparams)
                             });
                         if let Some(np) = nparams {
+                            let mk = format!("{tn}.mk");
+                            let is_mk = args.len() > np
+                                && matches!(&*app_spine(&args[np]).0, Term::Const(c, _) if **c == *mk);
                             if args.len() > np
                                 && args[..=np].iter().all(|a| !has_bvar(a))
-                                && !has_fvar(&args[np])
+                                && (is_mk || !has_fvar(&args[np]))
                                 && first_mvar(&args[np]).is_none()
                             {
                                 let head = mk_apps(&f, &args[..=np]);
@@ -1595,6 +1797,90 @@ impl<'a> Cx<'a> {
                 Ok(let_(Mult::Omega, vty, val, abstract_fvars(&body, &[x])))
             }
         }
+    }
+
+    /// `|x, y| body`: parameter types come from the expected function type
+    /// unless annotated.
+    fn elab_lambda(
+        &mut self,
+        params: &[LamParam],
+        body: &Expr,
+        exp: Option<&T>,
+        span: Span,
+    ) -> R<T> {
+        let (depth, nlocal) = (self.scope.len(), self.local_insts.len());
+        let mut xs = Vec::new();
+        let mut expected = exp.cloned();
+        for p in params {
+            let from_exp = match &expected {
+                Some(t) => {
+                    let t = self.tc.zonk(t);
+                    let w = from_kernel(self.tc.whnf(&t), p.name.span)?;
+                    match &*w {
+                        Term::Pi(m, d, b) => Some((*m, d.clone(), b.clone())),
+                        _ => None,
+                    }
+                }
+                None => None,
+            };
+            let ty = match (&p.ty, &from_exp) {
+                (Some(t), _) => self.elab_type(t)?,
+                (None, Some((_, d, _))) => d.clone(),
+                (None, None) => {
+                    return err(
+                        p.name.span,
+                        "cannot infer the type of this closure parameter; add an annotation like `|x: Nat|`",
+                    )
+                }
+            };
+            let mult = from_exp.as_ref().map_or(Mult::Omega, |(m, _, _)| *m);
+            if let Some((_, d, _)) = &from_exp {
+                self.coerce_eq(&ty, d, p.name.span)?;
+            }
+            let x = self.tc.fresh(&p.name.name, ty, mult);
+            self.scope.push((p.name.name.clone(), fvar(x)));
+            xs.push(x);
+            expected = from_exp.map(|(_, _, b)| instantiate(&b, &fvar(x)));
+        }
+        let b = match &expected {
+            Some(t) => self.elab_check(body, t),
+            None => self.elab(body, None),
+        };
+        self.scope.truncate(depth);
+        self.local_insts.truncate(nlocal);
+        let b = b?;
+        let _ = span;
+        self.tc.zonk_locals();
+        let b = self.tc.zonk(&b);
+        Ok(self.tc.mk_lam(&xs, &b))
+    }
+
+    /// `for x in xs { body }` is `for_each(xs, fun x => do { body })`.
+    fn elab_for(&mut self, var: &Ident, iter: &Expr, body: &Block, span: Span) -> R<T> {
+        let it = self.elab(iter, None)?;
+        let it = self.tc.zonk(&it);
+        let ity = from_kernel(self.tc.infer(&it), iter.span)?;
+        let ity = self.tc.zonk(&ity);
+        let ity = from_kernel(self.tc.whnf(&ity), iter.span)?;
+        let elem = match &*ity {
+            Term::App(f, a) if matches!(&**f, Term::Const(n, _) if &**n == "List") => a.clone(),
+            _ => {
+                return err(
+                    iter.span,
+                    format!(
+                        "`for` loops iterate over a `List`, but this has type `{}`",
+                        self.pp(&ity)
+                    ),
+                )
+            }
+        };
+        let x = self.tc.fresh(&var.name, elem.clone(), Mult::Omega);
+        self.scope.push((var.name.clone(), fvar(x)));
+        let unit_io = self.io_type(&self.unit_type());
+        let b = self.elab_do(body, Some(&unit_io), span);
+        self.scope.pop();
+        let lam = self.close_lam(x, &b?);
+        Ok(mk_apps(&cnst("for_each".into(), vec![]), &[elem, it, lam]))
     }
 
     fn fresh_type(&mut self, span: Span) -> T {
@@ -1874,6 +2160,9 @@ impl<'a> Cx<'a> {
                     *t = ctor_app.clone();
                 }
             }
+            if let Some(rc) = &mut self.rec {
+                rc.refined.push((ctor_app.clone(), x));
+            }
             let sub = self.compile_match(new_cols, new_rows, &ret_c, false, span);
             self.scope = saved;
             let sub = sub?;
@@ -1913,10 +2202,14 @@ impl<'a> Cx<'a> {
         let dty = from_kernel(self.tc.local_ty(decr), span)?;
         let arg = self.elab_check(&args[k], &dty)?;
         let arg = self.tc.zonk(&arg);
-        let ih = match &*arg {
-            Term::FVar(f) => self.rec.as_ref().and_then(|rc| rc.fields.get(f).cloned()),
-            _ => None,
-        };
+        let ih = self.rec.as_ref().and_then(|rc| match &*arg {
+            Term::FVar(f) => rc.fields.get(f).cloned(),
+            _ => rc
+                .refined
+                .iter()
+                .find(|(t, _)| self.tc.zonk(t) == arg)
+                .and_then(|(_, x)| rc.fields.get(x).cloned()),
+        });
         let Some(ih) = ih else {
             return err(
                 args[k].span,
@@ -1976,6 +2269,9 @@ fn mentions_expr(e: &Expr, name: &str) -> bool {
         }
         ExprKind::Field(b, _) => mentions_expr(b, name),
         ExprKind::Block(b) | ExprKind::Do(b) => mentions_block(b, name),
+        ExprKind::List(items) => items.iter().any(|a| mentions_expr(a, name)),
+        ExprKind::Lambda { body, .. } => mentions_expr(body, name),
+        ExprKind::For { iter, body, .. } => mentions_expr(iter, name) || mentions_block(body, name),
         ExprKind::If(c, t, e) => {
             mentions_expr(c, name)
                 || mentions_block(t, name)
