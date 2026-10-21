@@ -1540,6 +1540,11 @@ impl<'a> Cx<'a> {
         with_ih: bool,
         span: Span,
     ) -> R<Vec<Goal>> {
+        // indices that are not variables (`h : Even(1)`) are replaced by fresh variables
+        // with an equation, which each case then carries as a hypothesis `heq_i`
+        if let Some((ng, nvar)) = self.generalize_indices(st, &g, var, span)? {
+            return self.t_induct(st, ng, &nvar, generalizing, arms, with_ih, span);
+        }
         // hypotheses that mention the variable are reverted too, and put back in each case
         let mut to_revert: Vec<Ident> = generalizing.to_vec();
         if let Some(Term::FVar(xid)) = g
@@ -1548,13 +1553,30 @@ impl<'a> Cx<'a> {
             .rfind(|(n, _)| plain_name(n) == var.name)
             .map(|(_, v)| &**v)
         {
+            // hypotheses that mention the variable or the indices of its type
+            let mut roots = vec![*xid];
+            if let Ok(xty) = self.tc.local_ty(*xid) {
+                let xty = self.tc.zonk(&xty);
+                if let Ok(w) = self.tc.whnf(&xty) {
+                    let (h, targs) = app_spine(&w);
+                    if let Term::Const(n, _) = &*h {
+                        if let Some(Decl::Inductive(info)) = self.env.get(n) {
+                            for t in targs.iter().skip(info.nparams) {
+                                if let Term::FVar(i) = &**t {
+                                    roots.push(*i);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             for (n, v) in &g.scope {
                 if let Term::FVar(id) = &**v {
-                    if id != xid
-                        && self
-                            .tc
-                            .local_ty(*id)
-                            .is_ok_and(|ty| contains_fvar(&self.tc.zonk(&ty), *xid))
+                    if !roots.contains(id)
+                        && self.tc.local_ty(*id).is_ok_and(|ty| {
+                            let ty = self.tc.zonk(&ty);
+                            roots.iter().any(|r| contains_fvar(&ty, *r))
+                        })
                         && !to_revert.iter().any(|r| r.name == plain_name(n))
                     {
                         to_revert.push(Ident {
@@ -1570,6 +1592,123 @@ impl<'a> Cx<'a> {
             return self.t_induct_core(st, g2, var, arms, with_ih, &names, span);
         }
         self.t_induct_core(st, g, var, arms, with_ih, &[], span)
+    }
+
+    /// `h : I params t` with some index `t` not a (distinct) variable becomes
+    /// `∀ j, ∀ h' : I params j, j = t → goal`, introduced as `idx_i`, `hx`, `heq_i`.
+    fn generalize_indices(
+        &mut self,
+        st: &mut Tac,
+        g: &Goal,
+        var: &Ident,
+        span: Span,
+    ) -> R<Option<(Goal, Ident)>> {
+        let Some((_, v)) = g.scope.iter().rfind(|(n, _)| plain_name(n) == var.name) else {
+            return Ok(None);
+        };
+        let Term::FVar(xid) = &**v else {
+            return Ok(None);
+        };
+        let xid = *xid;
+        let Ok(xty) = self.tc.local_ty(xid) else {
+            return Ok(None);
+        };
+        let xty = self.tc.zonk(&xty);
+        let w = from_kernel(self.tc.whnf(&xty), span)?;
+        let (h, targs) = app_spine(&w);
+        let Term::Const(iname, ilevels) = &*h else {
+            return Ok(None);
+        };
+        let Some(Decl::Inductive(info)) = self.env.get(iname).cloned() else {
+            return Ok(None);
+        };
+        if info.nindices == 0 {
+            return Ok(None);
+        }
+        let idxs = &targs[info.nparams..];
+        let mut seen = Vec::new();
+        let is_var = |t: &T, seen: &mut Vec<u32>| match &**t {
+            Term::FVar(i) if *i != xid && !seen.contains(i) => {
+                seen.push(*i);
+                true
+            }
+            _ => false,
+        };
+        if idxs.iter().all(|t| is_var(t, &mut seen)) {
+            return Ok(None);
+        }
+        let mut new_idxs = Vec::new();
+        let mut js = Vec::new();
+        let mut eqs = Vec::new();
+        let mut seen = Vec::new();
+        for (i, t) in idxs.iter().enumerate() {
+            if is_var(t, &mut seen) {
+                new_idxs.push(t.clone());
+                continue;
+            }
+            let ty = from_kernel(self.tc.infer(t), span)?;
+            let ty = self.tc.zonk(&ty);
+            let lvl = self.sort_level_of(&ty, span)?;
+            let j = self.tc.fresh(&format!("idx{i}"), ty.clone(), Mult::Omega);
+            new_idxs.push(fvar(j));
+            let eq = mk_apps(
+                &cnst("Eq".into(), vec![lvl.clone()]),
+                &[ty.clone(), fvar(j), t.clone()],
+            );
+            let e = self.tc.fresh(&format!("heq{i}"), eq, Mult::Omega);
+            js.push((j, t.clone(), ty, lvl));
+            eqs.push(e);
+        }
+        let hty = mk_apps(
+            &cnst(iname.clone(), ilevels.clone()),
+            &[targs[..info.nparams].to_vec(), new_idxs].concat(),
+        );
+        let hx = self.tc.fresh("hx", hty, Mult::Omega);
+        self.tc.zonk_locals();
+        let target = self.tc.zonk(&g.target);
+        let binders: Vec<u32> = js
+            .iter()
+            .map(|(j, ..)| *j)
+            .chain(std::iter::once(hx))
+            .chain(eqs.iter().copied())
+            .collect();
+        let pi_ty = self.tc.mk_pi(&binders, &target);
+        let ng = self.new_goal(g, pi_ty, "");
+        let mut args: Vec<T> = js.iter().map(|(_, t, ..)| t.clone()).collect();
+        args.push(fvar(xid));
+        for (_, t, ty, lvl) in &js {
+            args.push(mk_apps(
+                &cnst("Eq.refl".into(), vec![lvl.clone()]),
+                &[ty.clone(), t.clone()],
+            ));
+        }
+        self.solve(st, g, mk_apps(&mvar(ng.mv), &args));
+        let mut names: Vec<Ident> = Vec::new();
+        for (k, (j, ..)) in js.iter().enumerate() {
+            let _ = j;
+            names.push(Ident {
+                name: format!("idx{k}"),
+                span,
+            });
+        }
+        names.push(Ident {
+            name: "hx".into(),
+            span,
+        });
+        for k in 0..eqs.len() {
+            names.push(Ident {
+                name: format!("heq{k}"),
+                span,
+            });
+        }
+        let mut gs = self.t_intro(st, ng, &names, span)?;
+        Ok(Some((
+            gs.remove(0),
+            Ident {
+                name: "hx".into(),
+                span,
+            },
+        )))
     }
 
     /// Put the hypotheses `names` (reverted before the split) back in a new case.
@@ -1723,11 +1862,24 @@ impl<'a> Cx<'a> {
                 )
             }
         };
-        if info.nindices != 0 {
-            return err(
-                var.span,
-                format!("`{what}` on indexed families is not supported yet"),
-            );
+        // the indices of an indexed family must be distinct variables: the motive
+        // abstracts them (`cases h` on `h : a = b` needs `b` to be a variable)
+        let idx_terms: Vec<T> = targs[info.nparams..].to_vec();
+        let mut idx_fvs: Vec<u32> = Vec::new();
+        for t in &idx_terms {
+            match &**t {
+                Term::FVar(i) if *i != xid && !idx_fvs.contains(i) => idx_fvs.push(*i),
+                _ => {
+                    return err(
+                        var.span,
+                        format!(
+                            "`{what}`: the indices of `{}` must be distinct variables, found `{}`",
+                            var.name,
+                            self.pp(t)
+                        ),
+                    )
+                }
+            }
         }
         let rec_info = match self.env.get(&info.rec) {
             Some(Decl::Rec(r)) => r.clone(),
@@ -1755,7 +1907,10 @@ impl<'a> Cx<'a> {
             ilevels.clone()
         };
         let params: Vec<T> = targs[..info.nparams].to_vec();
-        let motive = lam(Mult::Omega, xty.clone(), abstract_fvars(&target, &[xid]));
+        self.tc.zonk_locals();
+        let motive = self
+            .tc
+            .mk_lam(&[idx_fvs.clone(), vec![xid]].concat(), &target);
         let mut rty = from_kernel(self.env.const_type(&info.rec, &rec_levels), span)?;
         for p in params.iter().chain(std::iter::once(&motive)) {
             match &*rty {
@@ -1801,9 +1956,11 @@ impl<'a> Cx<'a> {
             let mut scope: Vec<(String, T)> = g
                 .scope
                 .iter()
-                .enumerate()
-                .filter(|(j, _)| *j != pos)
-                .map(|(_, e)| e.clone())
+                .filter(|(_, v)| match &**v {
+                    Term::FVar(i) => *i != xid && !idx_fvs.contains(i),
+                    _ => true,
+                })
+                .cloned()
                 .collect();
             let mut k = 0;
             while let Term::Pi(m, d, b) = &*cur.clone() {
@@ -1851,6 +2008,7 @@ impl<'a> Cx<'a> {
         let mut args = params;
         args.push(motive);
         args.extend(minors);
+        args.extend(idx_terms);
         args.push(fvar(xid));
         self.solve(st, &g, mk_apps(&cnst(info.rec.clone(), rec_levels), &args));
         for (sub, body) in arm_goals {

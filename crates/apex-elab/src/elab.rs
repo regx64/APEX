@@ -507,6 +507,8 @@ impl Elaborator {
         } else if ["omega", "linarith", "termination_by", "decreasing_by"]
             .iter()
             .any(|w| src.contains(w))
+            || mentions("le")
+            || mentions("lt")
         {
             self.load_omega();
         }
@@ -881,26 +883,79 @@ impl Elaborator {
     }
 
     fn elab_enum(&mut self, d: &EnumDecl, span: Span) -> R<()> {
-        let ind_ty = self.ind_type(&d.generics, 1, span)?;
+        // `: Prop` makes an inductive predicate, otherwise a `Type`
+        let level = match d.sort.as_ref().map(|e| &e.kind) {
+            None => 1,
+            Some(ExprKind::Var(n)) if n == "Type" => 1,
+            Some(ExprKind::Var(n)) if n == "Prop" => 0,
+            Some(_) => {
+                return err(
+                    d.sort.as_ref().map_or(span, |e| e.span),
+                    "an enum is a `Type` or a `Prop`",
+                )
+            }
+        };
+        let ind_ty = {
+            let mut cx = self.cx();
+            let (pfv, _) = cx.elab_binders(&d.generics, &[])?;
+            let declared = d
+                .generics
+                .iter()
+                .filter(|g| !g.name.name.starts_with('\''))
+                .count();
+            if pfv.len() != declared {
+                return err(
+                    span,
+                    "trait bounds on type declarations are not supported yet",
+                );
+            }
+            let mut all = pfv;
+            for (n, t) in &d.indices {
+                let ty = cx.elab_type(t)?;
+                let fv = cx.tc.fresh(&n.name, ty, Mult::Omega);
+                cx.scope.push((n.name.clone(), fvar(fv)));
+                all.push(fv);
+            }
+            cx.close(&all, &sort(Level::of_nat(level)), true, span)?
+        };
         let name = d.name.name.clone();
         // scratch environment in which the type is visible, for recursive fields
         let mut scratch = self.env.clone();
         from_kernel(scratch.add_axiom(&name, &[], ind_ty.clone()), d.name.span)?;
         let mut ctors = Vec::new();
+        let mut local_counts = Vec::new();
         {
             let mut cx = Cx::new(&scratch, &self.masks, &self.aliases, &self.tables);
             for v in &d.variants {
                 let (pfv, _) = cx.elab_binders(&d.generics, &[])?;
+                // constructor-local implicit binders (the indices' variables)
+                let (lfv, _) = cx.elab_binders(&v.generics, &[])?;
                 let mut fields = Vec::new();
                 for ft in &v.fields {
                     let ty = cx.elab_type(ft)?;
                     fields.push(cx.tc.fresh("_", ty, Mult::Omega));
                 }
                 let pargs: Vec<T> = pfv.iter().map(|&i| fvar(i)).collect();
-                let result = mk_apps(&cnst(name.as_str().into(), vec![]), &pargs);
-                let all: Vec<u32> = pfv.iter().chain(&fields).copied().collect();
+                let result = match &v.result {
+                    Some(e) => cx.elab_type(e)?,
+                    None => {
+                        if !d.indices.is_empty() {
+                            return err(
+                                v.name.span,
+                                format!(
+                                    "constructor `{}` of an indexed family needs a result type: `: {}(..)`",
+                                    v.name.name, name
+                                ),
+                            );
+                        }
+                        mk_apps(&cnst(name.as_str().into(), vec![]), &pargs)
+                    }
+                };
+                cx.solve_goals(true)?;
+                let all: Vec<u32> = pfv.iter().chain(&lfv).chain(&fields).copied().collect();
                 let cty = cx.close(&all, &result, true, v.name.span)?;
                 ctors.push((format!("{name}.{}", v.name.name).as_str().into(), cty));
+                local_counts.push(lfv.len());
                 cx.scope.clear();
             }
         }
@@ -909,6 +964,10 @@ impl Elaborator {
             .iter()
             .filter(|g| !g.name.name.starts_with('\''))
             .count();
+        let cnames: Vec<String> = ctors
+            .iter()
+            .map(|(n, _): &(Name, T)| n.to_string())
+            .collect();
         self.register_inductive(
             InductiveDecl {
                 name: name.as_str().into(),
@@ -919,7 +978,12 @@ impl Elaborator {
             },
             nparams,
             span,
-        )
+        )?;
+        // constructor-local binders are implicit too
+        for (cn, n) in cnames.iter().zip(local_counts) {
+            self.masks.insert(cn.clone(), vec![Bk::Imp; nparams + n]);
+        }
+        Ok(())
     }
 
     fn elab_struct(&mut self, d: &StructDecl, span: Span) -> R<()> {

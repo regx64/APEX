@@ -11,7 +11,7 @@
 - [ ] A-1b 표면 문법 `mutual { .. }`, 엘라보레이터/`match`/탭틱 지원, 중첩 귀납형 (`List<Tree>` 필드)
 - [x] A-2 구조 η (필드 타입이 앞 필드에 의존하지 않는 구조체; 의존 구조체와 단위형 η는 아직)
 - [x] A-3 몫 `Quot` (mk/lift/ind/sound, lift 계산 규칙은 커널 whnf), 공리 `propext`/`Classical.choice`, `funext`는 Quot.sound에서 유도(공리 아님). 표면 문법 `forall(x: A) -> T` 추가
-- [ ] A-4 인덱스 족 전체 (`induction`/`cases`가 인덱스를 다루도록)
+- [x] A-4 인덱스 족: 표면 문법 `enum Even(n: Nat): Prop { Zero: Even(0), Add2<k: Nat>(Even(k)): Even(k + 2) }` / `enum Vec<T>(n: Nat) { .. }`, `induction`/`cases`가 인덱스를 추상화(변수가 아닌 인덱스는 등식 `heq_i`로 일반화). `match`(B-2)는 아직
 - [ ] A-5 `Nat`/`Int`/`String` 리터럴 가속(GMP급), 독립 검증기
 
 ## B. 엘라보레이터

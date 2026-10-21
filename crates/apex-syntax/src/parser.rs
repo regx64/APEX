@@ -704,10 +704,28 @@ impl Parser {
         self.expect(&T::Enum)?;
         let name = self.ident()?;
         let generics = self.generics()?;
+        let mut indices = Vec::new();
+        if self.eat(&T::LParen) {
+            while *self.peek() != T::RParen {
+                let n = self.ident()?;
+                self.expect(&T::Colon)?;
+                indices.push((n, self.ty()?));
+                if !self.eat(&T::Comma) {
+                    break;
+                }
+            }
+            self.expect(&T::RParen)?;
+        }
+        let sort = if self.eat(&T::Colon) {
+            Some(self.ty()?)
+        } else {
+            None
+        };
         self.expect(&T::LBrace)?;
         let mut variants = Vec::new();
         while *self.peek() != T::RBrace {
             let vname = self.ident()?;
+            let vgenerics = self.generics()?;
             let mut fields = Vec::new();
             if self.eat(&T::LParen) {
                 while *self.peek() != T::RParen {
@@ -718,9 +736,16 @@ impl Parser {
                 }
                 self.expect(&T::RParen)?;
             }
+            let result = if self.eat(&T::Colon) {
+                Some(self.ty()?)
+            } else {
+                None
+            };
             variants.push(Variant {
                 name: vname,
+                generics: vgenerics,
                 fields,
+                result,
             });
             if !self.eat(&T::Comma) {
                 break;
@@ -730,6 +755,8 @@ impl Parser {
         Ok(EnumDecl {
             name,
             generics,
+            indices,
+            sort,
             variants,
             derives: Vec::new(),
         })

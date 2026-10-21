@@ -104,13 +104,21 @@ pub struct StructDecl {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Variant {
     pub name: Ident,
+    /// Constructor-local implicit binders: `Add2<k: Nat>(Even(k)): Even(k + 2)`.
+    pub generics: Vec<Generic>,
     pub fields: Vec<Expr>,
+    /// The result type when the family is indexed: `: Even(k + 2)`.
+    pub result: Option<Expr>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumDecl {
     pub name: Ident,
     pub generics: Vec<Generic>,
+    /// Indices of an indexed family: `enum Vec<T>(n: Nat)`.
+    pub indices: Vec<(Ident, Expr)>,
+    /// `: Prop` makes an inductive predicate (default `Type`).
+    pub sort: Option<Expr>,
     pub variants: Vec<Variant>,
     /// `#[derive(BEq, Show)]`
     pub derives: Vec<String>,
