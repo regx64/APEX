@@ -199,7 +199,23 @@ pub fn cmd_new(name: &str) -> Result<(), String> {
 pub fn cmd_build(dir: &str) -> Result<(), String> {
     let p = Project::open(dir)?;
     let files = p.all_files()?;
+    // incremental: a build whose sources (and compiler) are unchanged since the last
+    // successful one has nothing to redo
+    let stamp_path = p.root.join("target").join("apex-build.stamp");
+    let stamp = build_stamp(&files);
+    if std::fs::read_to_string(&stamp_path).is_ok_and(|old| old.trim() == stamp) {
+        println!(
+            "ok: {} v{} (up to date, {} files unchanged)",
+            p.manifest.name,
+            p.manifest.version,
+            files.len()
+        );
+        return Ok(());
+    }
     apex_elab::check_files(&files)?;
+    if std::fs::create_dir_all(stamp_path.parent().expect("has a parent")).is_ok() {
+        let _ = std::fs::write(&stamp_path, &stamp);
+    }
     println!(
         "ok: {} v{} ({} files checked)",
         p.manifest.name,
@@ -260,4 +276,22 @@ pub fn cmd_test(dir: &str) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+/// A fingerprint of the project's sources and of this compiler build.
+fn build_stamp(files: &[(String, String)]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    env!("CARGO_PKG_VERSION").hash(&mut h);
+    if let Ok(m) = std::env::current_exe().and_then(std::fs::metadata) {
+        m.len().hash(&mut h);
+        if let Ok(t) = m.modified() {
+            t.hash(&mut h);
+        }
+    }
+    for (path, src) in files {
+        path.hash(&mut h);
+        src.hash(&mut h);
+    }
+    format!("{:016x}", h.finish())
 }

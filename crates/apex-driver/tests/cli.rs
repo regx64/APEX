@@ -30,6 +30,9 @@ fn project_lifecycle() {
         String::from_utf8_lossy(&build.stderr)
     );
     assert!(String::from_utf8_lossy(&build.stdout).contains("2 files checked"));
+    // nothing changed: the second build is a no-op
+    let again = apex().current_dir(&proj).arg("build").output().unwrap();
+    assert!(String::from_utf8_lossy(&again.stdout).contains("up to date"));
     let run = apex().current_dir(&proj).arg("run").output().unwrap();
     assert_eq!(String::from_utf8_lossy(&run.stdout), "hello from APEX\n");
     let test = apex().current_dir(&proj).arg("test").output().unwrap();
@@ -196,4 +199,33 @@ fn compile_builds_a_native_executable_that_matches_the_interpreter() {
     let interp = apex().arg("run").arg(&src).output().unwrap();
     assert_eq!(native.stdout, interp.stdout);
     assert_eq!(String::from_utf8_lossy(&native.stdout), "610\n");
+}
+
+#[test]
+fn lsp_publishes_diagnostics() {
+    let mut child = apex()
+        .arg("lsp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let frame = |body: &str| format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+    let text = "fn f() -> Nat { true }\\n";
+    let msgs = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#.to_string(),
+        format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"file:///a.apex","text":"{text}"}}}}}}"#
+        ),
+        r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#.to_string(),
+        r#"{"jsonrpc":"2.0","method":"exit"}"#.to_string(),
+    ];
+    let mut stdin = child.stdin.take().unwrap();
+    for m in &msgs {
+        stdin.write_all(frame(m).as_bytes()).unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("publishDiagnostics"), "{text}");
+    assert!(text.contains("type mismatch"), "{text}");
 }

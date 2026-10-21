@@ -1,4 +1,5 @@
 mod doc;
+mod lsp;
 mod project;
 mod repl;
 
@@ -74,6 +75,10 @@ fn main() -> ExitCode {
             }
             Err(msg) => Err((msg, apex_span::Span::default())),
         }),
+        (Some("lsp"), _) => {
+            lsp::run();
+            ExitCode::SUCCESS
+        }
         (Some("repl"), _) => {
             repl::run();
             ExitCode::SUCCESS

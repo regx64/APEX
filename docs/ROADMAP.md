@@ -40,6 +40,6 @@
 ## F. 도구와 런타임
 - [x] F-1 네이티브 백엔드: `apex compile f.apex -o out`이 지우기(erasure)된 IR 중 `main`이 닿는 것을 데이터로, 느긋한 환경 기계의 C 이식(`runtime.c`)과 함께 C로 내보내 `cc`로 빌드한다 (`tests/run/*.apex` 32개가 인터프리터와 같은 출력). 한계: 최적화하는 AOT가 아니라 같은 기계를 C로 옮긴 것, GC 없음(메모리를 해제하지 않음), `Nat`은 u128. Cranelift/LLVM 대신 C를 택함
 - [x] F-2 패키지/모듈: `apex.toml`, `import a.b;`(의존성 먼저 로드, 순환 검출), `apex new/build/run/test` (원격 레지스트리·버전 해석은 없음)
-- [x] F-3 REPL: `apex repl` (선언 누적, 식 평가, `:type NAME`). LSP는 아직
+- [x] F-3 REPL: `apex repl` (선언 누적, 식 평가, `:type NAME`). `apex lsp`는 진단(parse/elab 오류와 위치)만
 - [x] F-4 문서 생성: `apex doc` (시그니처와 `///` 주석 → Markdown)
-- [ ] F-5 증분 컴파일
+- [x] F-5 증분 컴파일: `apex build`는 소스+컴파일러 지문(`target/apex-build.stamp`)이 같으면 "up to date"로 건너뛰고, 번들 라이브러리의 증명은 디스크 캐시(`~/.cache/apex`)에서 가져온다. 파일 단위가 아니라 프로젝트 단위(환경이 파일들 사이에서 공유되므로)
