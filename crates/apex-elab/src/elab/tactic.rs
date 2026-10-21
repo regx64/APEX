@@ -11,6 +11,15 @@ use super::*;
 
 mod omega;
 
+/// Options of `simp`.
+#[derive(Default, Clone, Copy)]
+struct SimpOpts {
+    /// `simp only`: no `#[simp]` library.
+    only: bool,
+    /// `simp_all`: equations among the hypotheses are rules too.
+    all_hyps: bool,
+}
+
 /// One open goal.
 #[derive(Clone)]
 struct Goal {
@@ -498,7 +507,36 @@ impl<'a> Cx<'a> {
                 Ok(vec![ng])
             }
             TacticKind::Rw(rules, at) => self.t_rw(st, g, rules, at.as_ref(), span),
-            TacticKind::Simp(lemmas, at) => self.t_simp(st, g, lemmas, at.as_ref(), span),
+            TacticKind::Simp(lemmas, at) => {
+                self.t_simp(st, g, lemmas, at.as_ref(), SimpOpts::default(), span)
+            }
+            TacticKind::SimpOnly(lemmas, at) => {
+                let opts = SimpOpts {
+                    only: true,
+                    all_hyps: false,
+                };
+                self.t_simp(st, g, lemmas, at.as_ref(), opts, span)
+            }
+            TacticKind::SimpAll(lemmas) => {
+                let opts = SimpOpts {
+                    only: false,
+                    all_hyps: true,
+                };
+                self.t_simp(st, g, lemmas, None, opts, span)
+            }
+            TacticKind::SimpArith(lemmas) => {
+                let rest = match self.t_simp(st, g.clone(), lemmas, None, SimpOpts::default(), span)
+                {
+                    Ok(gs) => gs,
+                    // nothing to simplify: omega may still do it
+                    Err(e) if e.msg.contains("made no progress") => vec![g],
+                    Err(e) => return Err(e),
+                };
+                for ng in rest {
+                    self.t_omega(st, ng, span)?;
+                }
+                Ok(vec![])
+            }
             TacticKind::Unfold(names) => {
                 let mut tgt = self.tc.zonk(&g.target);
                 for n in names {
@@ -1079,6 +1117,7 @@ impl<'a> Cx<'a> {
         g: Goal,
         lemmas: &[Expr],
         at: Option<&Ident>,
+        opts: SimpOpts,
         span: Span,
     ) -> R<Vec<Goal>> {
         enum Rule {
@@ -1103,8 +1142,22 @@ impl<'a> Cx<'a> {
             }
             rules.push(Rule::Term(self.elab_in_goal(e, None)?));
         }
-        for name in self.tables.simp.clone() {
-            rules.push(Rule::Global(name));
+        if opts.all_hyps {
+            for (_, v) in g.scope.iter().rev() {
+                if let Term::FVar(id) = &**v {
+                    if let Ok(ty) = self.tc.local_ty(*id) {
+                        let ty = self.tc.zonk(&ty);
+                        if matches!(&*app_spine(&ty).0, Term::Const(n, _) if &**n == "Eq") {
+                            rules.push(Rule::Term(v.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        if !opts.only {
+            for name in self.tables.simp.clone() {
+                rules.push(Rule::Global(name));
+            }
         }
         let mut cur = g;
         let mut progress = false;
@@ -1204,12 +1257,16 @@ impl<'a> Cx<'a> {
                         if let Some((ng, side)) =
                             self.rewrite_once(st, &cur, &rule, false, None, span)?
                         {
-                            // only unconditional rewrites: every argument must be determined
-                            let determined = rule
-                                .args
-                                .iter()
-                                .all(|a| !matches!(&*self.tc.zonk(a), Term::MVar(_)));
-                            if determined && side.is_empty() {
+                            // a conditional rule fires when its side conditions (propositions)
+                            // can be discharged; an undetermined data argument rejects it
+                            let mut ok = true;
+                            for s in &side {
+                                if !self.is_prop_type(&s.target) || !self.discharge(st, s, span) {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                            if ok {
                                 next = Some(ng);
                                 break;
                             }
@@ -1338,12 +1395,41 @@ impl<'a> Cx<'a> {
             if args.is_empty() || !matches!(self.env.get(n), Some(Decl::Def { .. })) {
                 continue;
             }
+            // predicates such as `le` and `lt` stay folded: tactics recognize them by name
+            if let Ok(sort_of) = self.tc.infer(&s) {
+                if matches!(self.tc.whnf(&sort_of).as_deref(), Ok(Term::Sort(l)) if l.is_zero()) {
+                    continue;
+                }
+            }
             if let Some(w) = self.eval_head(&s) {
                 let body = replace_term(t, &s, 0);
                 return Some(instantiate(&body, &w));
             }
         }
         None
+    }
+
+    fn is_prop_type(&mut self, ty: &T) -> bool {
+        let ty = self.tc.zonk(ty);
+        match self.tc.infer(&ty).and_then(|s| self.tc.ensure_sort(&s)) {
+            Ok(l) => self.tc.zonk_level(&l).is_zero(),
+            Err(_) => false,
+        }
+    }
+
+    /// Prove a side condition of a conditional rewrite rule from the context.
+    fn discharge(&mut self, st: &mut Tac, g: &Goal, span: Span) -> bool {
+        if self.close_by_hyp(st, g) || self.try_rfl(st, g) {
+            return true;
+        }
+        if self.env.get("omega_sound").is_some() {
+            let snap = self.tc.snapshot();
+            if self.t_omega(st, g.clone(), span).is_ok() {
+                return true;
+            }
+            self.tc.restore(snap);
+        }
+        false
     }
 
     fn is_theorem_const(&mut self, name: &str) -> bool {

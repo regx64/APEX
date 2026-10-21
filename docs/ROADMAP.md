@@ -27,7 +27,11 @@
 - [ ] C-2 `MetaM`/`TacticM`, `elab`; 탭틱을 APEX 자신으로 재작성 (부트스트랩)
 
 ## D. 자동화
-- [x] D-1 `omega` (Nat 선형 산술, 검증된 증명서 검사기; Int·`/`·`%`·정수 타이트닝은 아직)  D-2 `simp` 완전판(`at`, 조건부, 합동)  D-3 `ring`/`linarith`  D-4 `conv`  D-5 `aesop`류
+- [x] D-1 `omega` (Nat 선형 산술, 검증된 증명서 검사기; Int·`/`·`%`·정수 타이트닝은 아직)
+- [x] D-2 `simp` 확장 (`at`, 조건부 재작성, `simp only`/`simp_arith`/`simp_all`; 합동 기반 재작성은 아직)
+- [ ] D-3 `ring`/`linarith`
+- [ ] D-4 `conv`
+- [ ] D-5 `aesop`류
 
 ## E. 라이브러리
 - [ ] E-1 core (Nat/Int/List/Array/String/Option/HashMap)  E-2 Mathlib 규모 수학

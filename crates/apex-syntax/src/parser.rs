@@ -68,6 +68,8 @@ const TACTIC_WORDS: &[&str] = &[
     "have",
     "rw",
     "simp",
+    "simp_arith",
+    "simp_all",
     "unfold",
     "induction",
     "cases",
@@ -286,7 +288,11 @@ impl Parser {
                 self.expect(&T::RBracket)?;
                 K::Rw(rules, self.at_clause()?)
             }
-            "simp" => {
+            "simp" | "simp_arith" | "simp_all" => {
+                let only = word == "simp" && matches!(self.peek(), T::Ident(w) if w == "only");
+                if only {
+                    self.bump();
+                }
                 let mut lemmas = Vec::new();
                 if self.eat(&T::LBracket) {
                     while *self.peek() != T::RBracket {
@@ -297,7 +303,12 @@ impl Parser {
                     }
                     self.expect(&T::RBracket)?;
                 }
-                K::Simp(lemmas, self.at_clause()?)
+                match word.as_str() {
+                    "simp_arith" => K::SimpArith(lemmas),
+                    "simp_all" => K::SimpAll(lemmas),
+                    _ if only => K::SimpOnly(lemmas, self.at_clause()?),
+                    _ => K::Simp(lemmas, self.at_clause()?),
+                }
             }
             "unfold" => {
                 let names = self.binder_names()?;

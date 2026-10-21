@@ -289,6 +289,12 @@ pub enum TacticKind {
     /// Rewrite rules; `true` means right-to-left (`<- h`).
     Rw(Vec<(bool, Expr)>, Option<Ident>),
     Simp(Vec<Expr>, Option<Ident>),
+    /// `simp only [..]`: just the given rules, no `#[simp]` library.
+    SimpOnly(Vec<Expr>, Option<Ident>),
+    /// `simp_arith`: `simp`, then `omega` on what is left.
+    SimpArith(Vec<Expr>),
+    /// `simp_all`: `simp` with every equation among the hypotheses as a rule.
+    SimpAll(Vec<Expr>),
     Unfold(Vec<Ident>),
     /// `induction x generalizing a b with { .. }`
     Induction(Ident, Vec<Ident>, Option<Vec<CaseArm>>),

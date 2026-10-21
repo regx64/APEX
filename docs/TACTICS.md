@@ -46,6 +46,7 @@ theorem add_comm(a: Nat, b: Nat): a + b = b + a := by {
 | `have h: T := e` / `:= by { .. }` | 보조 사실을 가설로 |
 | `rw [h, <- g] at h2` | 등식으로 다시 쓴다 (`<-`는 오른쪽에서 왼쪽). 끝나면 `rfl`을 시도한다 |
 | `simp [h, f]` | 재작성을 반복 (`#[simp]` 정리 + 주어진 가설/정의). 끝나면 `rfl`/`assumption` |
+| `simp only [h]` / `simp_arith` / `simp_all` | `simp only`는 주어진 규칙만; `simp_arith`는 `simp` 뒤 `omega`; `simp_all`은 가설의 등식도 규칙으로 |
 | `unfold f` | 정의 `f`를 펼친다 (뒤에 `rfl` 시도) |
 | `induction x generalizing a b with { c(a, ih) => { .. }, .. }` | `x`에 대한 귀납 (재귀 인자마다 `ih`) |
 | `cases x with { c(a) => { .. }, .. }` | 경우 나누기 (`And`, `Or`, `False`, `Nat`, 사용자 `enum` …) |
@@ -63,7 +64,7 @@ theorem add_comm(a: Nat, b: Nat): a + b = b + a := by {
 (계산으로 맞추지 않는다: 그렇지 않으면 `n * succ(m)`이 `0 * a`와 맞아 버린다). 그런 다음
 `s`의 모든 출현을 모티브 `fun x => 목표[x/s]`로 추상화하고
 `Eq.subst motive (rhs = lhs) ?새목표`로 푼다. `simp`는 이 한 걸음을 규칙이 더 맞지 않을 때까지 반복한다
-(500걸음 상한; 조건부 규칙(미결정 가설 인자)은 건너뛴다).
+(500걸음 상한). 조건부 규칙은 부수 조건(명제)을 가설·`rfl`·`omega`로 증명할 수 있을 때만 발동한다.
 
 ## 4. 프렐루드의 논리와 정리 라이브러리
 
@@ -74,7 +75,7 @@ theorem add_comm(a: Nat, b: Nat): a + b = b + a := by {
 ## 5. 하지 않는 것 (솔직하게)
 
 - `omega`는 유리수 완화(Fourier–Motzkin)라서 정수에서만 성립하는 모순(예: `2x = 1`), `/`, `%`, 비선형 곱, `Or` 목표, `Int`는 못 한다.
-- `simp`의 조건부 재작성, 합동(congruence) 기반 재작성 (지금은 모티브 방식), 함수 방정식 보조정리 자동 생성 (닫힌 호출은 계산으로 펼치지만 열린 재귀 호출은 `show`로 직접 쓴다).
+- 합동(congruence) 기반 재작성 (지금은 모티브 방식), 함수 방정식 보조정리 자동 생성 (닫힌 호출은 계산으로 펼치지만 열린 재귀 호출은 `show`로 직접 쓴다).
 - 인덱스가 있는 귀납 족(`Eq`, 벡터)에 대한 `induction`/`cases`.
 - `Exists`, `Iff`, 순서 관계 `<`/`≤`의 명제 버전 (`<`는 `Bool`을 돌려준다). `decide`는 `Not`을 모른다.
 - 상호 재귀/깊은 필드 재귀 함수에 대한 방정식 보조정리 자동 생성 (재귀 함수는 `induction` 뒤 `rfl`/`simp [f]`의 계산으로).
