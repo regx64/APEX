@@ -12,19 +12,31 @@ use std::collections::HashMap;
 pub struct ElabError {
     pub msg: String,
     pub span: Span,
+    /// An error code such as `E0499`, for borrow errors.
+    pub code: Option<String>,
+    /// Secondary locations, shown as notes.
+    pub notes: Vec<(Span, String)>,
+}
+
+impl ElabError {
+    pub fn new(span: Span, msg: impl Into<String>) -> ElabError {
+        ElabError {
+            msg: msg.into(),
+            span,
+            code: None,
+            notes: vec![],
+        }
+    }
 }
 
 type R<X> = Result<X, ElabError>;
 
 fn err<X>(span: Span, msg: impl Into<String>) -> R<X> {
-    Err(ElabError {
-        msg: msg.into(),
-        span,
-    })
+    Err(ElabError::new(span, msg))
 }
 
 fn from_kernel<X>(r: KResult<X>, span: Span) -> R<X> {
-    r.map_err(|KernelError(msg)| ElabError { msg, span })
+    r.map_err(|KernelError(msg)| ElabError::new(span, msg))
 }
 
 /// An argument to an application: surface syntax, or an already elaborated term.
@@ -123,9 +135,15 @@ fn tuple_get(tys: &[T], p: T, i: usize) -> T {
 }
 
 fn sig_error(e: apex_borrowck::SigError) -> ElabError {
+    ElabError::new(e.span, e.msg)
+}
+
+fn borrow_error(d: apex_borrowck::Diag) -> ElabError {
     ElabError {
-        msg: e.msg,
-        span: e.span,
+        msg: d.msg,
+        span: d.span,
+        code: (d.code != "APEX").then(|| d.code.to_string()),
+        notes: d.notes,
     }
 }
 
@@ -476,11 +494,10 @@ impl Elaborator {
             match found {
                 Some(r) => r,
                 None => {
-                    return Err(first_err.unwrap_or(ElabError {
-                        msg: "a recursive function needs at least one parameter to recurse on"
-                            .into(),
-                        span: f.name.span,
-                    }))
+                    return Err(first_err.unwrap_or(ElabError::new(
+                        f.name.span,
+                        "a recursive function needs at least one parameter to recurse on",
+                    )))
                 }
             }
         };
@@ -544,6 +561,7 @@ impl Elaborator {
             let v = cx.coerce(v, &ret, block.span)?;
             cx.wrap_mut_result(&ret, &mvars, v)
         })?;
+        cx.borrow_check(f)?;
         Ok((
             cx.close(&fvs, &ret_full, true, span)?,
             cx.close(&fvs, &body, false, span)?,
@@ -858,6 +876,12 @@ impl Elaborator {
             };
             let info = self.tables.traits[&tname].clone();
             let (fvs, mask) = cx.elab_binders(&d.generics, &[])?;
+            cx.outer_lifetimes = d
+                .generics
+                .iter()
+                .filter(|g| g.name.name.starts_with('\''))
+                .map(|g| g.name.name.clone())
+                .collect();
             let self_ty = cx.elab_type(&d.self_ty)?;
             cx.scope.push(("Self".into(), self_ty.clone()));
             let mut class_args = vec![self_ty];
@@ -1118,6 +1142,12 @@ struct Cx<'a> {
     /// Same, for the arms of the `match` being compiled.
     leaf_do: bool,
     synth_counter: usize,
+    /// Where each call was resolved to a constant, for the borrow checker.
+    calls: HashMap<(u32, u32), String>,
+    /// `&T` parameters (the variable ids), which cannot be assigned through.
+    shared_refs: Vec<u32>,
+    /// Lifetimes declared by the enclosing impl.
+    outer_lifetimes: Vec<String>,
     /// Where each metavariable was created, for "cannot infer" errors.
     spans: HashMap<u32, Span>,
 }
@@ -1148,6 +1178,9 @@ impl<'a> Cx<'a> {
             do_mode: false,
             leaf_do: false,
             synth_counter: 0,
+            calls: HashMap::new(),
+            shared_refs: Vec::new(),
+            outer_lifetimes: Vec::new(),
             spans: HashMap::new(),
         }
     }
@@ -1224,6 +1257,9 @@ impl<'a> Cx<'a> {
                 Mode::Default => Mult::Omega,
             };
             let id = self.tc.fresh(&p.name.name, ty, mult);
+            if matches!(p.ty.kind, ExprKind::Ref { mutable: false, .. }) {
+                self.shared_refs.push(id);
+            }
             let key = if matches!(p.ty.kind, ExprKind::Ref { mutable: true, .. }) {
                 mut_key(&p.name.name)
             } else {
@@ -1501,7 +1537,10 @@ impl<'a> Cx<'a> {
     ) -> R<T> {
         let (mut term, mask) = head;
         let sig = match &*app_spine(&term).0 {
-            Term::Const(n, _) => self.tables.sigs.get(&**n).cloned(),
+            Term::Const(n, _) => {
+                self.calls.insert((span.start, span.end), n.to_string());
+                self.tables.sigs.get(&**n).cloned()
+            }
             _ => None,
         };
         let takes_mut = |k: usize| {
@@ -1649,6 +1688,25 @@ impl<'a> Cx<'a> {
         self.resolve_place(base, "borrow as mutable")
     }
 
+    /// Borrow-check the function `f` that was just elaborated.
+    fn borrow_check(&self, f: &FnDecl) -> R<()> {
+        let callee = callee_of(f, &self.outer_lifetimes).map_err(sig_error)?;
+        let resolver = |sp: Span| {
+            self.calls
+                .get(&(sp.start, sp.end))
+                .and_then(|n| self.tables.sigs.get(n))
+                .cloned()
+        };
+        let is_ctor = |n: &str| self.global_ctor(n).is_some();
+        match apex_borrowck::check_fn(f, &callee, &resolver, &is_ctor)
+            .into_iter()
+            .next()
+        {
+            Some(d) => Err(borrow_error(d)),
+            None => Ok(()),
+        }
+    }
+
     /// The `&mut` parameters of a function, as mutable variables.
     fn mut_params(&self, params: &[Param]) -> Vec<(String, usize)> {
         params
@@ -1758,6 +1816,7 @@ impl<'a> Cx<'a> {
             let v = cx.coerce(v, &ret, block.span)?;
             cx.wrap_mut_result(&ret, &mvars, v)
         })?;
+        self.borrow_check(f)?;
         let ty = self.close(&pf, &ret_full, true, f.name.span)?;
         if !from_kernel(self.tc.is_def_eq(&ty, expected), f.name.span)? {
             return err(
@@ -2236,12 +2295,26 @@ impl<'a> Cx<'a> {
                     return err(e.span, format!("unknown identifier `{n}`"));
                 };
                 if !self.scope[idx].0.starts_with(MUT) {
-                    return err(
-                        e.span,
-                        format!(
-                            "cannot {purpose} `{n}`, which is not declared `mut` (write `let mut {n} := ..`; closures and loop bodies capture variables by value)"
-                        ),
-                    );
+                    let behind_shared = matches!(&*self.scope[idx].1, Term::FVar(id) if self.shared_refs.contains(id));
+                    let (code, msg) = if behind_shared {
+                        (
+                            "E0594",
+                            format!("cannot {purpose} `{n}`: it is behind a `&` reference (use `&mut` to allow changes)"),
+                        )
+                    } else if purpose == "assign to" {
+                        (
+                            "E0384",
+                            format!("cannot assign to `{n}`, which is not declared `mut` (write `let mut {n} := ..`; closures and loop bodies capture variables by value)"),
+                        )
+                    } else {
+                        (
+                            "E0596",
+                            format!("cannot {purpose} `{n}`, which is not declared `mut` (write `let mut {n} := ..`)"),
+                        )
+                    };
+                    let mut e = ElabError::new(e.span, msg);
+                    e.code = Some(code.to_string());
+                    return Err(e);
                 }
                 Ok(Place {
                     name: n.clone(),

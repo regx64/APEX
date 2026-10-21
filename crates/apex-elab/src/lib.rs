@@ -8,7 +8,7 @@ mod elab;
 
 pub use elab::{ElabError, Elaborator};
 
-use apex_span::render_diagnostic;
+use apex_span::{render_diagnostic, render_full};
 
 /// Parse, elaborate and kernel-check a whole source file against the prelude.
 /// On failure returns a rendered diagnostic.
@@ -17,6 +17,6 @@ pub fn check_source(path: &str, src: &str) -> Result<Elaborator, String> {
         apex_syntax::parse(src).map_err(|e| render_diagnostic(path, src, &e.msg, e.span))?;
     let mut el = Elaborator::new();
     el.elab_module(&module)
-        .map_err(|e| render_diagnostic(path, src, &e.msg, e.span))?;
+        .map_err(|e| render_full(path, src, e.code.as_deref(), &e.msg, e.span, &e.notes))?;
     Ok(el)
 }

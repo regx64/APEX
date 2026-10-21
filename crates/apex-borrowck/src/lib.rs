@@ -5,6 +5,8 @@
 //! copy-in / copy-out, so the checker's job is to reject programs where an alias
 //! would make that differ from pointer semantics.
 
+mod check;
 mod sig;
 
+pub use check::{check_fn, Diag};
 pub use sig::{callee_of, param_kind, Callee, ParamKind, RetKind, SigError};

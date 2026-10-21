@@ -52,6 +52,31 @@ mod tests {
 
 /// Render an error with a source excerpt, in the style of rustc.
 pub fn render_diagnostic(path: &str, src: &str, msg: &str, span: Span) -> String {
+    render_full(path, src, None, msg, span, &[])
+}
+
+/// Like `render_diagnostic`, with an error code (`error[E0499]: ..`) and
+/// secondary locations (`note: ..`), each shown with its own excerpt.
+pub fn render_full(
+    path: &str,
+    src: &str,
+    code: Option<&str>,
+    msg: &str,
+    span: Span,
+    notes: &[(Span, String)],
+) -> String {
+    let head = match code {
+        Some(c) => format!("error[{c}]: {msg}"),
+        None => format!("error: {msg}"),
+    };
+    let mut out = format!("{head}\n{}", excerpt(path, src, span, ""));
+    for (sp, text) in notes {
+        out.push_str(&format!("note: {text}\n{}", excerpt(path, src, *sp, "")));
+    }
+    out
+}
+
+fn excerpt(path: &str, src: &str, span: Span, label: &str) -> String {
     let (line, col) = span.line_col(src);
     let text = src.lines().nth(line - 1).unwrap_or("");
     let pad = " ".repeat(line.to_string().len());
@@ -61,8 +86,13 @@ pub fn render_diagnostic(path: &str, src: &str, msg: &str, span: Span) -> String
         .take_while(|&c| c != '\n')
         .count()
         .max(1);
+    let label = if label.is_empty() {
+        String::new()
+    } else {
+        format!(" {label}")
+    };
     format!(
-        "error: {msg}\n{pad}--> {path}:{line}:{col}\n{pad} |\n{line} | {text}\n{pad} | {}{}\n",
+        "{pad}--> {path}:{line}:{col}\n{pad} |\n{line} | {text}\n{pad} | {}{}{label}\n",
         " ".repeat(col - 1),
         "^".repeat(width)
     )
@@ -71,6 +101,24 @@ pub fn render_diagnostic(path: &str, src: &str, msg: &str, span: Span) -> String
 #[cfg(test)]
 mod render_tests {
     use super::*;
+
+    #[test]
+    fn renders_code_and_notes() {
+        let src = "f(&mut x, &mut x)";
+        let out = render_full(
+            "a.apex",
+            src,
+            Some("E0499"),
+            "two borrows",
+            Span::new(10, 16),
+            &[(Span::new(2, 8), "first borrow here".to_string())],
+        );
+        assert!(out.starts_with("error[E0499]: two borrows\n"), "{out}");
+        assert!(
+            out.contains("note: first borrow here\n --> a.apex:1:3"),
+            "{out}"
+        );
+    }
 
     #[test]
     fn renders_caret() {
