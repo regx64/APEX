@@ -7,3 +7,4 @@ edition.workspace = true
 apex-span = { path = "../apex-span" }
 apex-syntax = { path = "../apex-syntax" }
 apex-kernel = { path = "../apex-kernel" }
+apex-borrowck = { path = "../apex-borrowck" }

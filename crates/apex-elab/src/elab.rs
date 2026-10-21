@@ -1,5 +1,6 @@
 //! Bidirectional elaboration with metavariables and implicit arguments.
 
+use apex_borrowck::{callee_of, Callee, ParamKind};
 use apex_kernel::prelude::add_prelude;
 use apex_kernel::term::*;
 use apex_kernel::{Decl, Env, InductiveDecl, KResult, KernelError, Level, Mult, TypeChecker};
@@ -30,6 +31,9 @@ fn from_kernel<X>(r: KResult<X>, span: Span) -> R<X> {
 enum Arg<'e> {
     Expr(&'e Expr),
     Term(T),
+    /// A method receiver: the elaborated value, and the expression it came from
+    /// (which is the place to borrow when the method takes `&mut self`).
+    Recv(T, &'e Expr),
 }
 
 enum Res {
@@ -116,6 +120,33 @@ fn tuple_get(tys: &[T], p: T, i: usize) -> T {
         }
         [] => unreachable!(),
     }
+}
+
+fn sig_error(e: apex_borrowck::SigError) -> ElabError {
+    ElabError {
+        msg: e.msg,
+        span: e.span,
+    }
+}
+
+/// A variable, a field of a place, or a dereference of one.
+fn is_place_expr(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Var(_) => true,
+        ExprKind::Field(b, _) | ExprKind::Deref(b) => is_place_expr(b),
+        _ => false,
+    }
+}
+
+/// The component types of a tuple type built by `tuple_ty` with `k` components.
+fn split_tuple_ty(s: &T, k: usize) -> Vec<T> {
+    if k == 1 {
+        return vec![s.clone()];
+    }
+    let (_, args) = app_spine(s);
+    let mut v = vec![args[0].clone()];
+    v.extend(split_tuple_ty(&args[1], k - 1));
+    v
 }
 
 fn synth_var(name: &str, span: Span) -> Expr {
@@ -278,6 +309,8 @@ struct Tables {
     shadow: HashMap<String, String>,
     /// struct name -> constructor and field names (for field assignment)
     structs: HashMap<String, StructMeta>,
+    /// How each function takes its arguments (`&`, `&mut`, `own`), by kernel name.
+    sigs: HashMap<String, Callee>,
 }
 
 #[derive(Clone)]
@@ -389,6 +422,11 @@ impl Elaborator {
     }
 
     fn add_def(&mut self, name: &Ident, ty: T, val: T, mask: Vec<Bk>) -> R<()> {
+        self.add_def_named(name, ty, val, mask).map(|_| ())
+    }
+
+    /// Add a definition and return the kernel name it was stored under.
+    fn add_def_named(&mut self, name: &Ident, ty: T, val: T, mask: Vec<Bk>) -> R<String> {
         // a user definition may shadow a prelude one; it then lives under another kernel name
         let mut kname = name.name.clone();
         if self.prelude_loaded {
@@ -402,15 +440,22 @@ impl Elaborator {
             self.user_defs.insert(name.name.clone());
         }
         from_kernel(self.env.add_def(&kname, &[], ty, val), name.span)?;
-        self.masks.insert(kname, mask);
-        Ok(())
+        self.masks.insert(kname.clone(), mask);
+        Ok(kname)
     }
 
     fn elab_fn(&mut self, f: &FnDecl, span: Span) -> R<()> {
+        let callee = callee_of(f, &[]).map_err(sig_error)?;
         let recursive = f
             .body
             .as_ref()
             .is_some_and(|b| mentions_block(b, &f.name.name));
+        if recursive && callee.has_mut_params() {
+            return err(
+                f.name.span,
+                "a recursive function cannot have `&mut` parameters yet",
+            );
+        }
         let (ty, val, mask) = if !recursive {
             self.try_fn(f, span, None, None)?
         } else {
@@ -439,7 +484,9 @@ impl Elaborator {
                 }
             }
         };
-        self.add_def(&f.name, ty, val, mask)
+        let kname = self.add_def_named(&f.name, ty, val, mask)?;
+        self.tables.sigs.insert(kname, callee);
+        Ok(())
     }
 
     /// Elaborate a function; `decr` is the index (among `params`) of the
@@ -490,10 +537,15 @@ impl Elaborator {
         let Some(block) = &f.body else {
             return err(f.name.span, "a function needs a body");
         };
-        let body = cx.elab_block(block, Some(&ret))?;
-        let body = cx.coerce(body, &ret, block.span)?;
+        let mvars = cx.mut_params(&f.params);
+        let ret_full = cx.with_mut_result(&ret, &mvars)?;
+        let body = cx.scoped(|cx| {
+            let v = cx.elab_block_opts(block, Some(&ret), true)?;
+            let v = cx.coerce(v, &ret, block.span)?;
+            cx.wrap_mut_result(&ret, &mvars, v)
+        })?;
         Ok((
-            cx.close(&fvs, &ret, true, span)?,
+            cx.close(&fvs, &ret_full, true, span)?,
             cx.close(&fvs, &body, false, span)?,
             mask,
         ))
@@ -745,6 +797,18 @@ impl Elaborator {
                 cx.trait_telescope(&gens, d)
             })?;
         }
+        let outer: Vec<String> = d
+            .generics
+            .iter()
+            .filter(|g| g.name.name.starts_with('\''))
+            .map(|g| g.name.name.clone())
+            .collect();
+        for m in &d.fns {
+            let callee = callee_of(m, &outer).map_err(sig_error)?;
+            self.tables
+                .sigs
+                .insert(format!("{name}.{}", m.name.name), callee);
+        }
         let methods: Vec<String> = d.fns.iter().map(|m| m.name.name.clone()).collect();
         for m in &methods {
             self.tables
@@ -979,8 +1043,10 @@ impl Elaborator {
                 ret: f.ret.clone(),
                 body: f.body.clone(),
             };
+            let callee = callee_of(&fd, &[]).map_err(sig_error)?;
             let (ty, val, mask) = self.try_fn(&fd, span, None, Some(&d.self_ty))?;
-            self.add_def(&fd.name, ty, val, mask)?;
+            let kname = self.add_def_named(&fd.name, ty, val, mask)?;
+            self.tables.sigs.insert(kname, callee);
         }
         Ok(())
     }
@@ -1158,7 +1224,12 @@ impl<'a> Cx<'a> {
                 Mode::Default => Mult::Omega,
             };
             let id = self.tc.fresh(&p.name.name, ty, mult);
-            self.scope.push((p.name.name.clone(), fvar(id)));
+            let key = if matches!(p.ty.kind, ExprKind::Ref { mutable: true, .. }) {
+                mut_key(&p.name.name)
+            } else {
+                p.name.name.clone()
+            };
+            self.scope.push((key, fvar(id)));
             fvs.push(id);
             mask.push(Bk::Exp);
         }
@@ -1429,6 +1500,14 @@ impl<'a> Cx<'a> {
         span: Span,
     ) -> R<T> {
         let (mut term, mask) = head;
+        let sig = match &*app_spine(&term).0 {
+            Term::Const(n, _) => self.tables.sigs.get(&**n).cloned(),
+            _ => None,
+        };
+        let takes_mut = |k: usize| {
+            sig.as_ref().and_then(|s| s.params.get(k)).copied() == Some(ParamKind::RefMut)
+        };
+        let has_mut = sig.as_ref().is_some_and(Callee::has_mut_params);
         let mut fty = from_kernel(self.tc.infer(&term), span)?;
         let mut pending: Vec<(T, usize)> = Vec::new();
         let (mut next, mut i) = (0, 0);
@@ -1465,18 +1544,37 @@ impl<'a> Cx<'a> {
             }
         }
         // use the expected type to solve implicit arguments before elaborating the explicit ones
-        if let (Some(exp), true) = (exp, next == args.len()) {
+        if has_mut && sig.as_ref().is_some_and(|s| args.len() < s.params.len()) {
+            return err(
+                span,
+                "a function with `&mut` parameters cannot be partially applied",
+            );
+        }
+        // (a function with `&mut` parameters returns a pair, not the value `exp` describes)
+        if let (Some(exp), true, false) = (exp, next == args.len(), has_mut) {
             let snap = self.tc.snapshot();
             if !from_kernel(self.tc.is_def_eq(&fty, exp), span)? {
                 self.tc.restore(snap);
             }
         }
+        let mut mut_places: Vec<Place> = Vec::new();
         for (mv, k) in pending {
             let dom = from_kernel(self.tc.infer(&mv), span)?;
             let dom = self.tc.zonk(&dom);
             let a = match &args[k] {
+                Arg::Expr(e) if takes_mut(k) => {
+                    let (pl, cur) = self.mut_arg(e)?;
+                    mut_places.push(pl);
+                    self.coerce(cur, &dom, e.span)?
+                }
+                Arg::Recv(_, base) if takes_mut(k) => {
+                    let pl = self.receiver_place(base)?;
+                    let (cur, _) = self.read_place(&pl, base.span)?;
+                    mut_places.push(pl);
+                    self.coerce(cur, &dom, base.span)?
+                }
                 Arg::Expr(e) => self.elab_check(e, &dom)?,
-                Arg::Term(t) => self.coerce(t.clone(), &dom, span)?,
+                Arg::Term(t) | Arg::Recv(t, _) => self.coerce(t.clone(), &dom, span)?,
             };
             if !from_kernel(self.tc.is_def_eq(&mv, &a), span)? {
                 return err(
@@ -1489,8 +1587,97 @@ impl<'a> Cx<'a> {
                 );
             }
         }
+        if !mut_places.is_empty() {
+            // the call returned `(result, updated &mut arguments)`: bind it, and
+            // give each borrowed place its updated value
+            let rty = self.tc.zonk(&fty);
+            let rty = from_kernel(self.tc.whnf(&rty), span)?;
+            let (h, targs) = app_spine(&rty);
+            if !matches!(&*h, Term::Const(n, _) if &**n == "Prod") || targs.len() != 2 {
+                return err(
+                    span,
+                    "internal error: a function with `&mut` parameters must return a pair",
+                );
+            }
+            let (r_ty, s_ty) = (targs[0].clone(), targs[1].clone());
+            let tys = split_tuple_ty(&s_ty, mut_places.len());
+            let p = self.tc.fresh("call", rty.clone(), Mult::Omega);
+            self.lets.push((p, rty.clone(), term));
+            let snd = prod_snd(&r_ty, &s_ty, fvar(p));
+            for (i, pl) in mut_places.iter().enumerate() {
+                let updated = tuple_get(&tys, snd.clone(), i);
+                self.assign_place(pl, updated, span)?;
+            }
+            self.solve_goals(false)?;
+            return Ok(prod_fst(&r_ty, &s_ty, fvar(p)));
+        }
         self.solve_goals(false)?;
         Ok(term)
+    }
+
+    /// The place behind an argument passed to a `&mut` parameter: `&mut place`,
+    /// or a place that is itself a `&mut` variable (an implicit reborrow).
+    fn mut_arg(&mut self, e: &Expr) -> R<(Place, T)> {
+        let place_expr = match &e.kind {
+            ExprKind::Ref {
+                mutable: true,
+                inner,
+                ..
+            } => &**inner,
+            ExprKind::Ref { mutable: false, .. } => {
+                return err(
+                    e.span,
+                    "this parameter takes `&mut`, but a shared reference `&` was given",
+                )
+            }
+            _ if is_place_expr(e) => e,
+            _ => return err(e.span, "this parameter takes `&mut`: pass `&mut place`"),
+        };
+        let pl = self.resolve_place(place_expr, "borrow as mutable")?;
+        let (cur, _) = self.read_place(&pl, e.span)?;
+        Ok((pl, cur))
+    }
+
+    /// `base.method(..)` where the method takes `&mut self`: `base` must be a place.
+    fn receiver_place(&mut self, base: &Expr) -> R<Place> {
+        if !is_place_expr(base) {
+            return err(
+                base.span,
+                "cannot call a `&mut self` method on a temporary value; store it in a `let mut` variable first",
+            );
+        }
+        self.resolve_place(base, "borrow as mutable")
+    }
+
+    /// The `&mut` parameters of a function, as mutable variables.
+    fn mut_params(&self, params: &[Param]) -> Vec<(String, usize)> {
+        params
+            .iter()
+            .filter(|p| matches!(p.ty.kind, ExprKind::Ref { mutable: true, .. }))
+            .filter_map(|p| {
+                self.lookup_scope(&p.name.name)
+                    .map(|i| (p.name.name.clone(), i))
+            })
+            .collect()
+    }
+
+    /// What a function with `&mut` parameters returns: `(result, updated parameters)`.
+    fn with_mut_result(&mut self, ret: &T, vars: &[(String, usize)]) -> R<T> {
+        if vars.is_empty() {
+            return Ok(ret.clone());
+        }
+        let tys = self.state_types(vars)?;
+        Ok(prod_ty(ret, &tuple_ty(&tys)))
+    }
+
+    /// The body's value together with the `&mut` parameters as the body leaves them.
+    fn wrap_mut_result(&mut self, ret: &T, vars: &[(String, usize)], v: T) -> R<T> {
+        if vars.is_empty() {
+            return Ok(v);
+        }
+        let tys = self.state_types(vars)?;
+        let cur = self.state_terms(vars);
+        Ok(prod_mk(ret, &tuple_ty(&tys), v, tuple_mk(&tys, &cur)))
     }
 
     // ---- traits: bounds, instance search, methods ----
@@ -1535,6 +1722,8 @@ impl<'a> Cx<'a> {
                 Some(t) => self.elab_type(t)?,
                 None => self.unit_type(),
             };
+            let mvars = self.mut_params(&m.params);
+            let ret = self.with_mut_result(&ret, &mvars)?;
             let fty = self.close(&pf, &ret, true, m.name.span)?;
             self.scope.truncate(depth);
             self.local_insts.truncate(nlocal);
@@ -1562,9 +1751,14 @@ impl<'a> Cx<'a> {
             Some(t) => self.elab_type(t)?,
             None => self.unit_type(),
         };
-        let body = self.elab_block(block, Some(&ret))?;
-        let body = self.coerce(body, &ret, block.span)?;
-        let ty = self.close(&pf, &ret, true, f.name.span)?;
+        let mvars = self.mut_params(&f.params);
+        let ret_full = self.with_mut_result(&ret, &mvars)?;
+        let body = self.scoped(|cx| {
+            let v = cx.elab_block_opts(block, Some(&ret), true)?;
+            let v = cx.coerce(v, &ret, block.span)?;
+            cx.wrap_mut_result(&ret, &mvars, v)
+        })?;
+        let ty = self.close(&pf, &ret_full, true, f.name.span)?;
         if !from_kernel(self.tc.is_def_eq(&ty, expected), f.name.span)? {
             return err(
                 f.name.span,
@@ -1754,8 +1948,8 @@ impl<'a> Cx<'a> {
         }
     }
 
-    fn method_args<'e>(base: &T, args: &'e [Expr]) -> Vec<Arg<'e>> {
-        std::iter::once(Arg::Term(base.clone()))
+    fn method_args<'e>(b: &T, base: &'e Expr, args: &'e [Expr]) -> Vec<Arg<'e>> {
+        std::iter::once(Arg::Recv(b.clone(), base))
             .chain(args.iter().map(Arg::Expr))
             .collect()
     }
@@ -1795,7 +1989,7 @@ impl<'a> Cx<'a> {
             let inherent = format!("{tn}.{}", m.name);
             if matches!(self.env.get(&inherent), Some(Decl::Def { .. })) {
                 let head = self.const_term(&inherent);
-                return self.elab_app(head, Self::method_args(&b, args), exp, span);
+                return self.elab_app(head, Self::method_args(&b, base, args), exp, span);
             }
         }
         let traits = self
@@ -1814,10 +2008,10 @@ impl<'a> Cx<'a> {
         for tn in &traits {
             let head = self.const_term(&format!("{tn}.{}", m.name));
             if traits.len() == 1 {
-                return self.elab_app(head, Self::method_args(&b, args), exp, span);
+                return self.elab_app(head, Self::method_args(&b, base, args), exp, span);
             }
             let (snap, ngoals) = (self.tc.snapshot(), self.goals.len());
-            match self.elab_app(head, Self::method_args(&b, args), exp, span) {
+            match self.elab_app(head, Self::method_args(&b, base, args), exp, span) {
                 Ok(t) => return Ok(t),
                 Err(e) => {
                     self.tc.restore(snap);
@@ -1869,10 +2063,6 @@ impl<'a> Cx<'a> {
             Term::Let(m, ty, v, b) => let_(*m, self.devirt(ty), self.devirt(v), self.devirt(b)),
             _ => t.clone(),
         }
-    }
-
-    fn elab_block(&mut self, b: &Block, exp: Option<&T>) -> R<T> {
-        self.elab_block_opts(b, exp, false)
     }
 
     /// Elaborate a block. Bindings and effects go to `self.lets`; unless `hoist`
@@ -2280,14 +2470,36 @@ impl<'a> Cx<'a> {
                 return self.do_stmts(&new, tail, r, span);
             }
             Some((Stmt::Expr(e), rest)) => {
-                let a = self.fresh_type(e.span);
-                let io = self.io_type(&a);
-                let act = self.elab_action(e, &io)?;
-                let a = self.tc.zonk(&a);
-                let x = self.tc.fresh("_", a.clone(), Mult::Omega);
-                let body = self.do_stmts(rest, tail, r, span)?;
-                let lam = self.close_lam(x, &body);
-                bind(&a, act, lam)
+                let control = matches!(
+                    e.kind,
+                    ExprKind::If(..) | ExprKind::Match(..) | ExprKind::Block(_)
+                );
+                if control {
+                    let a = self.fresh_type(e.span);
+                    let io = self.io_type(&a);
+                    let act = self.elab_action(e, &io)?;
+                    let a = self.tc.zonk(&a);
+                    let x = self.tc.fresh("_", a.clone(), Mult::Omega);
+                    let body = self.do_stmts(rest, tail, r, span)?;
+                    let lam = self.close_lam(x, &body);
+                    bind(&a, act, lam)
+                } else {
+                    // an `IO` action, or a plain statement such as `inc(&mut x);`
+                    let act = self.elab(e, None)?;
+                    let ty = from_kernel(self.tc.infer(&act), e.span)?;
+                    let ty = self.tc.zonk(&ty);
+                    let ty = from_kernel(self.tc.whnf(&ty), e.span)?;
+                    match &*ty {
+                        Term::App(f, a) if matches!(&**f, Term::Const(n, _) if &**n == "IO") => {
+                            let a = a.clone();
+                            let x = self.tc.fresh("_", a.clone(), Mult::Omega);
+                            let body = self.do_stmts(rest, tail, r, span)?;
+                            let lam = self.close_lam(x, &body);
+                            bind(&a, act, lam)
+                        }
+                        _ => self.do_stmts(rest, tail, r, span)?,
+                    }
+                }
             }
             Some((Stmt::Assign { target, op, value }, rest)) => {
                 self.elab_assign(target, *op, value, target.span)?;
