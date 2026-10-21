@@ -489,6 +489,15 @@ impl Elaborator {
             src.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
                 .any(|x| x == w)
         };
+        // a name the program declares itself is not a reason to load the library
+        let declares = |w: &str| {
+            ["fn", "theorem", "struct", "enum"].iter().any(|kw| {
+                src.match_indices(&format!("{kw} {w}")).any(|(i, m)| {
+                    !src[i + m.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                })
+            })
+        };
+        let mentions = |w: &str| mentions(w) && !declares(w);
         let core = include_str!("prelude_core.apex");
         let core_names: Vec<String> = apex_syntax::parse(core)
             .map(|m| {
