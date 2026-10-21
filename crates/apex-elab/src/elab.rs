@@ -29,6 +29,7 @@ impl ElabError {
     }
 }
 
+mod derive;
 mod tactic;
 mod wf;
 
@@ -340,6 +341,8 @@ struct Tables {
     opens: Vec<String>,
     /// `variable` declarations of the enclosing sections.
     vars: Vec<Param>,
+    /// Struct declarations (after flattening `extends`), for children and `derive`.
+    struct_decls: HashMap<String, StructDecl>,
 }
 
 #[derive(Clone)]
@@ -539,8 +542,8 @@ impl Elaborator {
         match &item.kind {
             ItemKind::Fn(f) => self.elab_fn(f, item.span),
             ItemKind::Theorem(t) => self.elab_theorem(t, item.span),
-            ItemKind::Enum(e) => self.elab_enum(e, item.span),
-            ItemKind::Struct(s) => self.elab_struct(s, item.span),
+            ItemKind::Enum(e) => self.elab_enum_item(e, item.span),
+            ItemKind::Struct(s) => self.elab_struct_item(s, item.span),
             ItemKind::Trait(t) => self.elab_trait(t, item.span),
             ItemKind::Impl(i) => self.elab_impl(i, item.span),
             ItemKind::Namespace { name, items } => {

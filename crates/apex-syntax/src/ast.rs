@@ -94,7 +94,11 @@ pub struct Field {
 pub struct StructDecl {
     pub name: Ident,
     pub generics: Vec<Generic>,
+    /// `struct B extends A { .. }`: the fields of `A` come first.
+    pub parent: Option<Expr>,
     pub fields: Vec<Field>,
+    /// `#[derive(BEq, Show)]`
+    pub derives: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,6 +112,8 @@ pub struct EnumDecl {
     pub name: Ident,
     pub generics: Vec<Generic>,
     pub variants: Vec<Variant>,
+    /// `#[derive(BEq, Show)]`
+    pub derives: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

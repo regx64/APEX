@@ -372,14 +372,25 @@ impl Parser {
     fn item(&mut self) -> PResult<Item> {
         let start = self.span();
         let mut simp = false;
+        let mut derives: Vec<String> = Vec::new();
         while self.eat(&T::Hash) {
             self.expect(&T::LBracket)?;
             let attr = self.ident()?;
             match attr.name.as_str() {
+                "derive" => {
+                    self.expect(&T::LParen)?;
+                    while *self.peek() != T::RParen {
+                        derives.push(self.ident()?.name);
+                        if !self.eat(&T::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&T::RParen)?;
+                }
                 "simp" => simp = true,
                 other => {
                     return Err(ParseError {
-                        msg: format!("unknown attribute `{other}` (expected `simp`)"),
+                        msg: format!("unknown attribute `{other}` (expected `simp` or `derive`)"),
                         span: attr.span,
                     })
                 }
@@ -388,6 +399,9 @@ impl Parser {
         }
         if simp && *self.peek() != T::Theorem {
             return self.err("`#[simp]` can only be applied to a theorem");
+        }
+        if !derives.is_empty() && !matches!(self.peek(), T::Struct | T::Enum) {
+            return self.err("`#[derive(..)]` can only be applied to a struct or an enum");
         }
         let word = match self.peek() {
             T::Ident(w)
@@ -434,8 +448,16 @@ impl Parser {
         }
         let kind = match self.peek() {
             T::Fn => ItemKind::Fn(self.fn_decl()?),
-            T::Struct => ItemKind::Struct(self.struct_decl()?),
-            T::Enum => ItemKind::Enum(self.enum_decl()?),
+            T::Struct => {
+                let mut d = self.struct_decl()?;
+                d.derives = derives;
+                ItemKind::Struct(d)
+            }
+            T::Enum => {
+                let mut d = self.enum_decl()?;
+                d.derives = derives;
+                ItemKind::Enum(d)
+            }
             T::Trait => ItemKind::Trait(self.trait_decl()?),
             T::Impl => ItemKind::Impl(self.impl_decl()?),
             T::Theorem => {
@@ -649,6 +671,12 @@ impl Parser {
         self.expect(&T::Struct)?;
         let name = self.ident()?;
         let generics = self.generics()?;
+        let parent = if matches!(self.peek(), T::Ident(w) if w == "extends") {
+            self.bump();
+            Some(self.ty()?)
+        } else {
+            None
+        };
         self.expect(&T::LBrace)?;
         let mut fields = Vec::new();
         while *self.peek() != T::RBrace {
@@ -666,7 +694,9 @@ impl Parser {
         Ok(StructDecl {
             name,
             generics,
+            parent,
             fields,
+            derives: Vec::new(),
         })
     }
 
@@ -701,6 +731,7 @@ impl Parser {
             name,
             generics,
             variants,
+            derives: Vec::new(),
         })
     }
 
