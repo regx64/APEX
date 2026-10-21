@@ -175,8 +175,8 @@ fn compile_builds_a_native_executable_that_matches_the_interpreter() {
     let src = dir.join("p.apex");
     std::fs::write(
         &src,
-        "fn fib(n: Nat) -> Nat { match n { 0 => 0, 1 => 1, Nat.succ(Nat.succ(m)) => fib(m) + fib(m + 1) } }\n\
-         fn main() -> IO<Unit> { println(Nat.toString(fib(15))) }\n",
+        "fn fib_iter(n: Nat, a: Nat, b: Nat) -> Nat { match n { 0 => a, Nat.succ(m) => fib_iter(m, b, a + b) } }\n\
+         fn main() -> IO<Unit> { println(Nat.toString(fib_iter(15, 0, 1))) }\n",
     )
     .unwrap();
     let exe = dir.join("p");
