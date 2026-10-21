@@ -310,6 +310,24 @@ theorem int_ne_cross(a: Int, b: Int, p: Nat, q: Nat, r: Nat, s: Nat, ha: int_rep
     intro e;
     exact h(int_eq_by_cross(a, b, p, q, r, s, ha, hb, e))
 }
+theorem int_negSucc_rep(n: Nat): int_rep(Int.negSucc(n), 0, Nat.succ(n)) := by { simp [int_rep] }
+theorem int_lt_of_rep(a: Int, b: Int, p: Nat, q: Nat, r: Nat, s: Nat, ha: int_rep(a, p, q), hb: int_rep(b, r, s), h: lt(p + s, r + q)): int_lt(a, b) := by {
+    exact int_le_of_rep(int_add(a, Int.ofNat(1)), b, p + 1, q + 0, r, s,
+        int_add_rep(a, Int.ofNat(1), p, q, 1, 0, ha, int_one_rep()), hb, by { omega })
+}
+theorem int_rep_of_lt(a: Int, b: Int, p: Nat, q: Nat, r: Nat, s: Nat, ha: int_rep(a, p, q), hb: int_rep(b, r, s), h: int_lt(a, b)): lt(p + s, r + q) := by {
+    have x: le(p + 1 + s, r + (q + 0)) := int_rep_of_le(int_add(a, Int.ofNat(1)), b, p + 1, q + 0, r, s,
+        int_add_rep(a, Int.ofNat(1), p, q, 1, 0, ha, int_one_rep()), hb, h);
+    omega
+}
+theorem int_not_le_cross(a: Int, b: Int, p: Nat, q: Nat, r: Nat, s: Nat, ha: int_rep(a, p, q), hb: int_rep(b, r, s), h: Not<int_le(a, b)>): Not<le(p + s, r + q)> := by {
+    intro x;
+    exact h(int_le_of_rep(a, b, p, q, r, s, ha, hb, x))
+}
+theorem int_not_lt_cross(a: Int, b: Int, p: Nat, q: Nat, r: Nat, s: Nat, ha: int_rep(a, p, q), hb: int_rep(b, r, s), h: Not<int_lt(a, b)>): Not<lt(p + s, r + q)> := by {
+    intro x;
+    exact h(int_lt_of_rep(a, b, p, q, r, s, ha, hb, x))
+}
 impl LE for Int { fn le(self, other: Self) -> Prop { int_le(self, other) } }
 theorem int_le_refl(a: Int): int_le(a, a) := by { exists 0; exact int_add_zero(a) }
 theorem int_le_trans(a: Int, b: Int, c: Int, h1: int_le(a, b), h2: int_le(b, c)): int_le(a, c) := by {

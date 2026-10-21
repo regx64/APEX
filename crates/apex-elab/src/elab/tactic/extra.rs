@@ -241,7 +241,7 @@ impl<'a> Cx<'a> {
     }
 
     /// Destructure the hypothesis `hname` of goal `g` by `pat`.
-    fn rpat(
+    pub(super) fn rpat(
         &mut self,
         st: &mut Tac,
         mut g: Goal,

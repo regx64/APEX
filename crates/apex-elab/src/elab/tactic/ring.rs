@@ -56,6 +56,12 @@ impl<'a> Cx<'a> {
         let Some((_, alpha, a, b)) = self.eq_parts(&g.target) else {
             return err(span, "`ring` needs a goal `a = b`");
         };
+        // an equation between integers: translate to the natural numbers first
+        let int = cnst("Int".into(), vec![]);
+        if self.env.get("int_not_lt_cross").is_some() && self.def_eq(&alpha, &int) {
+            let ng = self.int_to_nat(st, g, span)?;
+            return self.t_ring(st, ng, span);
+        }
         let nat = cnst("Nat".into(), vec![]);
         if !self.def_eq(&alpha, &nat) {
             return err(span, "`ring` works on equations between natural numbers");

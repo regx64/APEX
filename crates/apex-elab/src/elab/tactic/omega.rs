@@ -728,6 +728,8 @@ impl<'a> Cx<'a> {
         if self.env.get("omega_sound").is_none() {
             return err(span, "the `omega` library is not loaded");
         }
+        // integer goals and hypotheses become statements about naturals first
+        let g = self.int_to_nat(st, g, span)?;
         // each case split carries the splits already done on its path
         let mut work: Vec<(Goal, OmegaState)> = vec![(g, OmegaState::default())];
         let mut steps = 0;

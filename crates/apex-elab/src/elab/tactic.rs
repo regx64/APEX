@@ -12,6 +12,7 @@ use super::*;
 mod auto;
 mod extra;
 mod imatch;
+mod intarith;
 mod noconf;
 mod omega;
 mod ring;
