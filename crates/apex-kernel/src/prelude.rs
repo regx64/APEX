@@ -155,8 +155,12 @@ pub fn add_prelude(env: &mut Env) -> KResult<()> {
             ),
         ],
     })?;
+    crate::below::add_pprod(env)?;
     add_io(env)?;
     add_logic(env)?;
+    for ind in ["Nat", "Bool", "Unit", "List"] {
+        env.add_below_brec(ind)?;
+    }
     Ok(())
 }
 

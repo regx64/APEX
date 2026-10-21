@@ -206,6 +206,10 @@ impl<'a> TypeChecker<'a> {
         id
     }
 
+    pub fn local_mult(&self, id: u32) -> Option<Mult> {
+        self.lctx.get(&id).map(|l| l.mult)
+    }
+
     pub fn local_ty(&self, id: u32) -> KResult<T> {
         match self.lctx.get(&id) {
             Some(l) => Ok(l.ty.clone()),

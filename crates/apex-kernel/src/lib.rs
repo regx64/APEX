@@ -1,6 +1,7 @@
 //! The trusted kernel: core terms, universe levels, a type checker with
 //! quantitative (0/1/ω) binders, and inductive types with generated recursors.
 
+pub mod below;
 pub mod builder;
 pub mod env;
 pub mod inductive;

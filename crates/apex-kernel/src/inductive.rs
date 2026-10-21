@@ -443,6 +443,9 @@ impl Env {
         for (k, rd) in rec_decls.into_iter().enumerate() {
             self.insert(rec_names[k].clone(), rd);
         }
+        if n == 1 {
+            self.add_below_brec(&d.types[0].name)?;
+        }
         Ok(())
     }
 }
