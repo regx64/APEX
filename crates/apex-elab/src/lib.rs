@@ -16,12 +16,7 @@ pub fn check_source(path: &str, src: &str) -> Result<Elaborator, String> {
     let module =
         apex_syntax::parse(src).map_err(|e| render_diagnostic(path, src, &e.msg, e.span))?;
     let mut el = Elaborator::new();
-    if ["omega", "termination_by", "decreasing_by"]
-        .iter()
-        .any(|w| src.contains(w))
-    {
-        el.load_omega();
-    }
+    el.load_libs_for(src);
     el.elab_module(&module)
         .map_err(|e| render_full(path, src, e.code.as_deref(), &e.msg, e.span, &e.notes))?;
     Ok(el)
@@ -31,12 +26,8 @@ pub fn check_source(path: &str, src: &str) -> Result<Elaborator, String> {
 /// Each file is a `(path, source)` pair; a failure is rendered against its own file.
 pub fn check_files(files: &[(String, String)]) -> Result<Elaborator, String> {
     let mut el = Elaborator::new();
-    if files.iter().any(|(_, src)| {
-        ["omega", "termination_by", "decreasing_by"]
-            .iter()
-            .any(|w| src.contains(w))
-    }) {
-        el.load_omega();
+    for (_, src) in files {
+        el.load_libs_for(src);
     }
     for (path, src) in files {
         let module =

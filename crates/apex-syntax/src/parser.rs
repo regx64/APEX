@@ -64,6 +64,7 @@ const TACTIC_WORDS: &[&str] = &[
     "symm",
     "decide",
     "omega",
+    "linarith",
     "show",
     "have",
     "rw",
@@ -261,7 +262,7 @@ impl Parser {
             "contradiction" => K::Contradiction,
             "symm" => K::Symm,
             "decide" => K::Decide,
-            "omega" => K::Omega,
+            "omega" | "linarith" => K::Omega,
             "show" => K::Show(self.ty()?),
             "have" => {
                 let name = self.ident()?;

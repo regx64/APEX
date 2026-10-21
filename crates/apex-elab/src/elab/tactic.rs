@@ -1237,8 +1237,13 @@ impl<'a> Cx<'a> {
             for r in &rules {
                 match r {
                     Rule::Unfold(n) => {
+                        // `simp [f]`: evaluate one call of `f`, as far as it reduces cleanly
                         let tgt = self.tc.zonk(&cur.target);
-                        if let Ok(t2) = self.unfold_in(&tgt, n) {
+                        let kn = match self.resolve(&n.name) {
+                            Some(Res::Global(kn)) => kn,
+                            _ => continue,
+                        };
+                        if let Some(t2) = self.eval_step_named(&tgt, Some(&kn)) {
                             let ng = self.new_goal(&cur, t2, "");
                             self.solve(st, &cur, mvar(ng.mv));
                             next = Some(ng);
@@ -1280,7 +1285,14 @@ impl<'a> Cx<'a> {
             }
             if next.is_none() {
                 let tgt = self.tc.zonk(&cur.target);
-                if let Some(t2) = self.eval_step(&tgt) {
+                // iota: a recursor (or `if`) whose major premise became a constructor
+                let reduced = self.reduce_recs(&tgt, 0);
+                let step = if reduced != tgt {
+                    Some(reduced)
+                } else {
+                    self.eval_step(&tgt)
+                };
+                if let Some(t2) = step {
                     let ng = self.new_goal(&cur, t2, "");
                     self.solve(st, &cur, mvar(ng.mv));
                     next = Some(ng);
@@ -1321,9 +1333,12 @@ impl<'a> Cx<'a> {
             if lparams.len() != ls.len() {
                 break;
             }
+            self.pending_call = cur.clone();
             let unfolded = head_beta(&mk_apps(&instantiate_levels(&val, &lparams, ls), &args));
             let next = self.tc.whnf_core(&unfolded).ok()?;
             let next = self.reduce_recs(&next, 0);
+            // recursive calls of the function come out as recursor applications: fold them back
+            let next = self.refold_calls(&next, &h, args.len(), 0);
             let (nh, _) = app_spine(&next);
             // an unfolding that gets stuck on a variable is not wanted: keep the call
             if matches!(&*nh, Term::Lam(..) | Term::MVar(_)) || self.mentions_rec(&next) {
@@ -1332,6 +1347,57 @@ impl<'a> Cx<'a> {
             cur = next;
         }
         (cur != *s).then_some(cur)
+    }
+
+    /// Turn recursor applications that are recursive calls of `f` back into calls:
+    /// `Rec params motive minors major others` is `f` applied with the major premise at
+    /// the position of the decreasing parameter. Found by trying each position and
+    /// checking definitional equality, so wrong guesses are harmless.
+    fn refold_calls(&mut self, t: &T, f: &T, nargs: usize, depth: u32) -> T {
+        if depth > 64 {
+            return t.clone();
+        }
+        match &**t {
+            Term::App(..) => {
+                let (h, args) = app_spine(t);
+                let args: Vec<T> = args
+                    .iter()
+                    .map(|a| self.refold_calls(a, f, nargs, depth + 1))
+                    .collect();
+                let me = mk_apps(&h, &args);
+                if let Term::Const(n, _) = &*h {
+                    if let Some(Decl::Rec(r)) = self.env.get(n).cloned() {
+                        let prefix = r.nparams + r.nmotives + r.nminors + r.nindices;
+                        if args.len() > prefix {
+                            let e = args.len() - prefix; // major premise and the other parameters
+                            if let Some(ngen) = nargs.checked_sub(e) {
+                                let (_, orig) = app_spine(&self.pending_call);
+                                if orig.len() == nargs {
+                                    let major = args[prefix].clone();
+                                    let others = &args[prefix + 1..];
+                                    for k in 0..e {
+                                        let mut explicit: Vec<T> = others.to_vec();
+                                        explicit.insert(k, major.clone());
+                                        let cand =
+                                            mk_apps(f, &[orig[..ngen].to_vec(), explicit].concat());
+                                        if self.def_eq(&cand, &me) {
+                                            return cand;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                me
+            }
+            Term::Lam(m, ty, b) => lam(
+                *m,
+                self.refold_calls(ty, f, nargs, depth + 1),
+                self.refold_calls(b, f, nargs, depth + 1),
+            ),
+            _ => t.clone(),
+        }
     }
 
     /// Reduce recursor applications inside a term (innermost first) where their
@@ -1373,7 +1439,10 @@ impl<'a> Cx<'a> {
     /// term unfolds into one; such results are not wanted in the goal.)
     fn mentions_rec(&self, t: &T) -> bool {
         match &**t {
-            Term::Const(n, _) => matches!(self.env.get(n), Some(Decl::Rec(_))),
+            // `if` is `Bool.rec`: a stuck condition is fine, a rewrite can still decide it
+            Term::Const(n, _) => {
+                &**n != "Bool.rec" && matches!(self.env.get(n), Some(Decl::Rec(_)))
+            }
             Term::App(f, a) => self.mentions_rec(f) || self.mentions_rec(a),
             Term::Lam(_, ty, b) | Term::Pi(_, ty, b) => {
                 self.mentions_rec(ty) || self.mentions_rec(b)
@@ -1387,11 +1456,19 @@ impl<'a> Cx<'a> {
 
     /// One evaluation step somewhere inside `t`: the new type, if any.
     fn eval_step(&mut self, t: &T) -> Option<T> {
+        self.eval_step_named(t, None)
+    }
+
+    /// Like `eval_step`, restricted to calls of one function.
+    fn eval_step_named(&mut self, t: &T, only: Option<&str>) -> Option<T> {
         let mut subs = Vec::new();
         collect_subterms(t, &mut subs);
         for s in subs {
             let (h, args) = app_spine(&s);
             let Term::Const(n, _) = &*h else { continue };
+            if only.is_some_and(|o| &**n != o) {
+                continue;
+            }
             if args.is_empty() || !matches!(self.env.get(n), Some(Decl::Def { .. })) {
                 continue;
             }

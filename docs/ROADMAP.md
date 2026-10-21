@@ -34,7 +34,8 @@
 - [ ] D-5 `aesop`류
 
 ## E. 라이브러리
-- [ ] E-1 core (Nat/Int/List/Array/String/Option/HashMap)  E-2 Mathlib 규모 수학
+- [~] E-1 core 라이브러리: `Nat` 순서·산술 정리(`prelude_omega.apex`, ~700줄)와 `List` 보조정리(`prelude_core.apex`: append/map/len/sum/reverse/range/filter), 모두 증명됨. 이름을 언급할 때만 로드. `Int`/`Array`/`String`/`Option`/`HashMap`은 아직
+- [ ] E-2 Mathlib 규모 수학
 
 ## F. 도구와 런타임
 - [ ] F-1 네이티브 백엔드(M7)

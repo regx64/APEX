@@ -478,6 +478,52 @@ impl Elaborator {
         });
     }
 
+    /// Load the libraries a program refers to. They are loaded on demand because they
+    /// cost startup time: `omega` and well-founded recursion need the arithmetic
+    /// library; naming one of the list lemmas loads the core library (which needs it too).
+    pub fn load_libs_for(&mut self, src: &str) {
+        let mentions = |w: &str| {
+            src.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+                .any(|x| x == w)
+        };
+        let core = include_str!("prelude_core.apex");
+        let core_names: Vec<String> = apex_syntax::parse(core)
+            .map(|m| {
+                m.items
+                    .iter()
+                    .filter_map(|i| match &i.kind {
+                        ItemKind::Theorem(t) => Some(t.name.name.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if core_names.iter().any(|n| mentions(n)) {
+            self.load_omega();
+            self.load_core();
+        } else if ["omega", "linarith", "termination_by", "decreasing_by"]
+            .iter()
+            .any(|w| src.contains(w))
+        {
+            self.load_omega();
+        }
+    }
+
+    fn load_core(&mut self) {
+        if self.env.get("list_append_nil").is_some() {
+            return;
+        }
+        let src = include_str!("prelude_core.apex");
+        let module = apex_syntax::parse(src).expect("core prelude must parse");
+        self.elab_module(&module).unwrap_or_else(|e| {
+            let (line, _) = e.span.line_col(src);
+            panic!(
+                "core prelude must elaborate: {} (prelude_core.apex line {line})",
+                e.msg
+            )
+        });
+    }
+
     pub fn env(&self) -> &Env {
         &self.env
     }
@@ -1379,6 +1425,8 @@ struct Cx<'a> {
     spans: HashMap<u32, Span>,
     /// `if` branches get the condition as a hypothesis (needed by `decreasing_by`).
     dep_if: bool,
+    /// The call being unfolded by `simp` (so its recursive calls can be folded back).
+    pending_call: T,
 }
 
 fn path_name(e: &Expr) -> Option<String> {
@@ -1412,6 +1460,7 @@ impl<'a> Cx<'a> {
             outer_lifetimes: Vec::new(),
             spans: HashMap::new(),
             dep_if: false,
+            pending_call: lit(0),
         }
     }
 

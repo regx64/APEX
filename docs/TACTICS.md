@@ -50,6 +50,7 @@ theorem add_comm(a: Nat, b: Nat): a + b = b + a := by {
 | `unfold f` | 정의 `f`를 펼친다 (뒤에 `rfl` 시도) |
 | `induction x generalizing a b with { c(a, ih) => { .. }, .. }` | `x`에 대한 귀납 (재귀 인자마다 `ih`) |
 | `cases x with { c(a) => { .. }, .. }` | 경우 나누기 (`And`, `Or`, `False`, `Nat`, 사용자 `enum` …) |
+| `omega` / `linarith` | (`linarith`는 `omega`의 별칭: 지금은 `Nat`만) |
 | `omega` | `Nat`의 선형 산술 (`+`, 리터럴 곱, `nat_sub`, `le`/`lt`/`=`/`Not`/`And`, 가설의 `Or`/`≠`) 증명. 아래 §6 |
 | `revert x` | 가설 `x`(와 그에 의존하는 것)를 목표의 전제로 되돌린다 |
 | `exists w` | `Exists(p)`를 증인 `w`로 증명 (뒤에 `rfl` 시도) |
@@ -94,3 +95,9 @@ theorem add_comm(a: Nat, b: Nat): a + b = b + a := by {
 
 `le`/`lt`는 `Exists`로 정의된 `Prop`이다 (`le(a, b) := Exists(|k| a + k = b)`). 표면 문법의 `<`는 `Bool`이므로
 증명에서는 `le(a, b)`/`lt(a, b)`를 쓴다. 이 라이브러리는 `omega`/`termination_by`/`decreasing_by`가 소스에 나올 때만 로드된다.
+
+## 7. 함수 펼치기 (simp / unfold)
+
+`simp [f]`와 `simp`는 인자가 생성자인 `f`의 호출을 한 걸음씩 평가한다: 정의를 펼치고 β·ι 환원한 뒤, 결과에 나온 재귀 호출(커널에서는 재귀자 `List.rec ..`)을
+`f(..)` 호출로 되돌려 접는다 (재귀자의 주 전제 위치를 매개변수 자리마다 시도해 정의적 동치로 확인). 인자가 변수라 막히면(재귀자가 변수를 기다리면) 펼치지 않는다.
+`if`는 `Bool.rec`이므로 조건이 막혀 있어도 펼친다: 조건을 가설(`c : p x = true`)로 다시 쓰면 다음 걸음에서 분기가 결정된다.
