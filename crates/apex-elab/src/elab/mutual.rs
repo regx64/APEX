@@ -31,6 +31,10 @@ struct Member<'a> {
     ilevels: Vec<Level>,
     /// The family's parameters, as this function's first parameter instantiates them.
     params: Vec<T>,
+    /// The slot in the family (its types, then the nested occurrences) and the family's
+    /// parameters as seen from this function.
+    slot: usize,
+    fam_params: Vec<T>,
     lvl: Level,
     /// `fun gens => fun t => Π others, result`
     motive: T,
@@ -117,40 +121,77 @@ impl Elaborator {
                 iname: iname.to_string(),
                 ilevels: ilevels.clone(),
                 params,
+                slot: 0,
+                fam_params: Vec::new(),
                 lvl,
                 motive,
             });
         }
-        // ---- the family: one function per type ----
-        let family: Vec<String> = match self.env.get(&ms[0].iname) {
-            Some(Decl::Inductive(i)) => i.family.iter().map(|n| n.to_string()).collect(),
+        // ---- the family: one function per type, and per nested occurrence ----
+        // the root is a type with nested occurrences if there is one (`Rose` for `List<Rose>`)
+        let root_idx = (0..ms.len())
+            .find(|&i| {
+                matches!(self.env.get(&ms[i].iname), Some(Decl::Inductive(ii)) if !ii.nested.is_empty())
+            })
+            .unwrap_or(0);
+        let root_info = match self.env.get(&ms[root_idx].iname) {
+            Some(Decl::Inductive(i)) => i.clone(),
             _ => unreachable!("checked above"),
         };
-        let mut order = Vec::new();
-        for fname in &family {
-            let hits: Vec<usize> = (0..ms.len()).filter(|&i| ms[i].iname == *fname).collect();
-            match hits.as_slice() {
-                [i] => order.push(*i),
-                [] => {
-                    return err(
-                        span,
-                        format!("the `mutual` group needs a function on `{fname}`, the other types of the family have one"),
-                    )
-                }
-                _ => {
-                    return err(
-                        span,
-                        format!("only one function per type of a mutual family is supported (`{fname}` has several)"),
-                    )
-                }
+        let family: Vec<String> = root_info.family.iter().map(|n| n.to_string()).collect();
+        let nested = root_info.nested.clone();
+        let root_params = ms[root_idx].params.clone();
+        let root_closed = root_params.iter().all(first_fvar_free);
+        let fam_levels = ms[root_idx].ilevels.clone();
+        let mut order: Vec<Option<usize>> = vec![None; family.len() + nested.len()];
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..ms.len() {
+            let slot = if let Some(k) = family.iter().position(|f| *f == ms[i].iname) {
+                ms[i].fam_params = ms[i].params.clone();
+                Some(k)
+            } else {
+                // a nested occurrence: `J args` with `args` the nested template over the family's parameters
+                let gens: Vec<T> = ms[i].fvs[..ms[i].ngen].iter().map(|&g| fvar(g)).collect();
+                let fp = if root_closed {
+                    root_params.clone()
+                } else {
+                    gens
+                };
+                let found = nested.iter().position(|n| {
+                    *n.ind == *ms[i].iname
+                        && n.args.len() == ms[i].params.len()
+                        && n.args
+                            .iter()
+                            .zip(&ms[i].params)
+                            .all(|(a, p)| instantiate_many(a, &fp) == *p)
+                });
+                ms[i].fam_params = fp;
+                found.map(|k| family.len() + k)
+            };
+            let Some(slot) = slot else {
+                return err(
+                    ms_span(fs, i),
+                    "every function of a `mutual` group must recurse on a type of one family (or a type nested in it)",
+                );
+            };
+            if order[slot].is_some() {
+                return err(
+                    ms_span(fs, i),
+                    "only one function per type of a mutual family is supported",
+                );
             }
+            ms[i].slot = slot;
+            order[slot] = Some(i);
         }
-        if order.len() != ms.len() {
-            return err(
-                span,
-                "every function of a `mutual` group must recurse on a type of one family",
-            );
-        }
+        let order: Vec<usize> = match order.into_iter().collect::<Option<Vec<_>>>() {
+            Some(o) => o,
+            None => {
+                return err(
+                    span,
+                    "the `mutual` group needs a function on every type of the family (and on each nested occurrence)",
+                )
+            }
+        };
         if ms.iter().any(|m| m.lvl != ms[0].lvl) {
             return err(
                 span,
@@ -164,8 +205,12 @@ impl Elaborator {
                     .map(|p| abstract_fvars(p, &m.fvs[..m.ngen]))
                     .collect()
             };
-            let first = shape(&ms[0]);
-            if ms.iter().any(|m| shape(m) != first) {
+            let first = shape(&ms[root_idx]);
+            if ms
+                .iter()
+                .filter(|m| m.slot < family.len())
+                .any(|m| shape(m) != first)
+            {
                 return err(
                     span,
                     "the functions of a `mutual` group must use the same type arguments for the family",
@@ -198,6 +243,12 @@ impl Elaborator {
                 mutual: Some(MutualCtx {
                     siblings: siblings.clone(),
                     motives,
+                    view: (m.slot >= family.len()).then(|| AuxView {
+                        nested_idx: m.slot - family.len(),
+                        root: family[0].clone(),
+                        fam_params: m.fam_params.clone(),
+                        fam_levels: fam_levels.clone(),
+                    }),
                 }),
             });
             let Some(block) = &m.f.body else {
@@ -233,15 +284,19 @@ impl Elaborator {
                 .iter()
                 .map(|c| head_beta(&mk_apps(c, &gens)))
                 .collect();
-            let info = match self.env.get(&m.iname) {
-                Some(Decl::Inductive(i)) => i.clone(),
-                _ => unreachable!("checked above"),
+            let rec_name = if m.slot < family.len() {
+                match self.env.get(&family[m.slot]) {
+                    Some(Decl::Inductive(i)) => i.rec.clone(),
+                    _ => unreachable!("family member"),
+                }
+            } else {
+                nested[m.slot - family.len()].rec.clone()
             };
-            let large = match self.env.get(&info.rec) {
-                Some(Decl::Rec(r)) => r.lparams.len() > info.lparams.len(),
+            let large = match self.env.get(&root_info.rec) {
+                Some(Decl::Rec(r)) => r.lparams.len() > root_info.lparams.len(),
                 _ => return err(span, "missing recursor"),
             };
-            let mut rec_levels = m.ilevels.clone();
+            let mut rec_levels = fam_levels.clone();
             if large {
                 rec_levels.insert(0, m.lvl.clone());
             } else if !m.lvl.is_zero() {
@@ -251,29 +306,39 @@ impl Elaborator {
                 );
             }
             let mut all_minors = Vec::new();
-            for (k, fname) in family.iter().enumerate() {
-                let member = order[k];
-                let ctors: Vec<String> = match self.env.get(fname) {
-                    Some(Decl::Inductive(i)) => i.ctors.iter().map(|c| c.to_string()).collect(),
-                    _ => unreachable!("family member"),
+            for (k, &member) in order.iter().enumerate() {
+                let (ctors, tname): (Vec<String>, String) = if k < family.len() {
+                    match self.env.get(&family[k]) {
+                        Some(Decl::Inductive(i)) => (
+                            i.ctors.iter().map(|c| c.to_string()).collect(),
+                            family[k].clone(),
+                        ),
+                        _ => unreachable!("family member"),
+                    }
+                } else {
+                    let n = &nested[k - family.len()];
+                    (
+                        n.ctors.iter().map(|c| c.to_string()).collect(),
+                        n.ind.to_string(),
+                    )
                 };
                 let have = &minors[member];
                 if have.len() != ctors.len() || have.iter().zip(&ctors).any(|((c, _), d)| c != d) {
                     return err(
                         ms_span(fs, member),
-                        format!("the `match` of `{}` must have one arm for each constructor of `{fname}`", fs[member].name.name),
+                        format!("the `match` of `{}` must have one arm for each constructor of `{tname}`", fs[member].name.name),
                     );
                 }
                 for (_, t) in have {
                     all_minors.push(head_beta(&mk_apps(t, &gens)));
                 }
             }
-            let mut args = m.params.clone();
+            let mut args = m.fam_params.clone();
             args.extend(motives);
             args.extend(all_minors);
             args.push(fvar(m.x));
             args.extend(m.explicit[1..].iter().map(|&o| fvar(o)));
-            let body = mk_apps(&cnst(info.rec.clone(), rec_levels), &args);
+            let body = mk_apps(&cnst(rec_name, rec_levels), &args);
             let _ = i;
             let fvs = m.fvs.clone();
             let ret = m.ret.clone();
@@ -289,4 +354,9 @@ impl Elaborator {
 
 fn ms_span(fs: &[&FnDecl], i: usize) -> Span {
     fs[i].name.span
+}
+
+/// Does the term mention no free variable?
+fn first_fvar_free(t: &T) -> bool {
+    !has_fvar(t)
 }

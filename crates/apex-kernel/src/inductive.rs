@@ -105,14 +105,18 @@ impl Env {
     /// Add mutually inductive types together with their recursors.
     pub fn add_mutual(&mut self, d: MutualDecl) -> KResult<()> {
         let backup = self.clone();
-        let r = self.add_mutual_inner(d);
+        let r = match self.expand_nested(&d) {
+            Err(e) => Err(e),
+            Ok(None) => self.add_mutual_inner(d),
+            Ok(Some((ext, auxes))) => self.add_nested(d, ext, auxes),
+        };
         if r.is_err() {
             *self = backup;
         }
         r
     }
 
-    fn add_mutual_inner(&mut self, d: MutualDecl) -> KResult<()> {
+    pub(crate) fn add_mutual_inner(&mut self, d: MutualDecl) -> KResult<()> {
         if d.types.is_empty() {
             return kerr("an inductive declaration needs at least one type");
         }
@@ -179,6 +183,7 @@ impl Env {
                     is_prop,
                     rec: rec_names[k].clone(),
                     family: d.types.iter().map(|t| t.name.clone()).collect(),
+                    nested: vec![],
                 }),
             );
         }
@@ -426,6 +431,7 @@ impl Env {
                     is_prop,
                     rec: rec_names[k].clone(),
                     family: d.types.iter().map(|t| t.name.clone()).collect(),
+                    nested: vec![],
                 }),
             );
             for (ci, (cn, cty)) in t.ctors.iter().enumerate() {
@@ -445,7 +451,7 @@ impl Env {
         for (k, rd) in rec_decls.into_iter().enumerate() {
             self.insert(rec_names[k].clone(), rd);
         }
-        if n == 1 {
+        if n == 1 && d.types.len() == 1 {
             self.add_below_brec(&d.types[0].name)?;
         }
         Ok(())

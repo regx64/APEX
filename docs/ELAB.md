@@ -165,3 +165,11 @@ M5 (소유권, 빌림 검사).
 
 `impl Coe<B> for A`가 있으면 `A`가 필요한 곳에 `B`를 줄 수 있다 (`coerce`가 `Coe.coe`를 끼운다; 한 단계만). `Nat` 리터럴이 `Int`가 되는 것도 이것이다.
 `(e : T)`는 타입 표기, `-e`는 `Neg.neg(e)`. `by { .. }`는 항 자리에서도 쓸 수 있다: 기대 타입의 미지수가 풀린 뒤에 증명한다 (`PendingBy`).
+
+## 중첩 귀납형 (A-1b)
+
+필드 타입이 `J args`(기존 귀납형 `J`에 가족 자신을 담은 인자)이면 커널(`nested.rs`)이 보조 타입 `Fam._nestedK`를 가족에 추가한다. 보조 타입의 생성자는 `J`의 것을
+`args`로 치환해 복사한 것이고 (J의 재귀 필드는 보조 타입 자신을 가리킨다; 더 깊은 중첩은 반복 발견). 확장된 가족의 재귀자를 평소처럼 만든 뒤,
+보조 타입/생성자를 `J args`/`J.c args`로 되돌려 `Fam.rec`(동기 N+보조 개수의 모티브)와 `Fam._nestedK.rec`(대상은 `J args`, 규칙은 `J`의 생성자)로 등록하고,
+번역된 재귀자를 다시 타입 검사한다. `IndInfo.nested`가 보조 항목(재귀자 이름, `J`, 인자 틀, 생성자)을 기록한다. `match`/`cases`/`induction`은 보조 모티브를
+상수 `PUnit`으로 채우고, `mutual { fn f(r: Rose) fn g(ks: List<Rose>) }`의 `g`는 `List.rec`이 아니라 보조 재귀자로 정의된다 (`AuxView`).

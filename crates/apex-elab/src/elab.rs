@@ -1720,8 +1720,22 @@ struct RecCtx {
 struct MutualCtx {
     /// Name and number of arguments of each function.
     siblings: Vec<(String, usize)>,
-    /// One motive per type of the family, over this function's type parameters.
+    /// One motive per member of the family (types, then nested occurrences), over this
+    /// function's type parameters.
     motives: Vec<T>,
+    /// Set for the function on a nested occurrence (`List<Rose>`).
+    view: Option<AuxView>,
+}
+
+/// How a function on a nested occurrence sees its family.
+#[derive(Clone)]
+struct AuxView {
+    /// Index among the family's nested occurrences.
+    nested_idx: usize,
+    /// The family's first type (its `IndInfo` lists the family and the nested occurrences).
+    root: String,
+    fam_params: Vec<T>,
+    fam_levels: Vec<Level>,
 }
 
 /// State of a function compiled through `I.brecOn`: every recursive field in scope
@@ -3794,15 +3808,62 @@ impl<'a> Cx<'a> {
         if info.nindices > 0 {
             return err(span, "matching on indexed families is not supported yet");
         }
-        let (ctors, ind_nlevels): (Vec<String>, usize) = (
-            info.ctors.iter().map(|c| c.to_string()).collect(),
-            info.lparams.len(),
-        );
-        let family: Vec<String> = info.family.iter().map(|n| n.to_string()).collect();
-        let info_rec = info.rec.clone();
+        let info = info.clone();
         let params = targs[..info.nparams].to_vec();
         let iname = iname.to_string();
         let ilevels = ilevels.clone();
+        // a function of a `mutual` group on a nested occurrence (`List<Rose>`) is defined by the
+        // auxiliary recursor of the family it belongs to: the scrutinee's type is `J args`, the
+        // family is the root's
+        let in_deep_early = self.rec.as_ref().is_some_and(|rc| rc.deep.is_some());
+        let aux_view: Option<AuxView> = if top && !in_deep_early {
+            self.rec
+                .as_ref()
+                .and_then(|rc| rc.mutual.as_ref().and_then(|m| m.view.clone()))
+        } else {
+            None
+        };
+        let (root_info, target, fam_params, fam_levels) = match &aux_view {
+            Some(v) => {
+                let Some(Decl::Inductive(ri)) = self.env.get(&v.root) else {
+                    return err(span, "internal error: missing family root");
+                };
+                (
+                    ri.clone(),
+                    ri.family.len() + v.nested_idx,
+                    v.fam_params.clone(),
+                    v.fam_levels.clone(),
+                )
+            }
+            None => {
+                let k = info.family.iter().position(|n| **n == *iname).unwrap_or(0);
+                (info.clone(), k, params.clone(), ilevels.clone())
+            }
+        };
+        let family: Vec<String> = root_info.family.iter().map(|n| n.to_string()).collect();
+        let nested = root_info.nested.clone();
+        let ind_nlevels = root_info.lparams.len();
+        let (ctors, info_rec): (Vec<String>, Name) = if target < family.len() {
+            (
+                root_info
+                    .family
+                    .get(target)
+                    .map_or_else(Vec::new, |n| match self.env.get(n) {
+                        Some(Decl::Inductive(i)) => i.ctors.iter().map(|c| c.to_string()).collect(),
+                        _ => vec![],
+                    }),
+                match self.env.get(&root_info.family[target]) {
+                    Some(Decl::Inductive(i)) => i.rec.clone(),
+                    _ => return err(span, "internal error: missing family member"),
+                },
+            )
+        } else {
+            let n = &nested[target - family.len()];
+            (
+                n.ctors.iter().map(|c| c.to_string()).collect(),
+                n.rec.clone(),
+            )
+        };
 
         // motive: fun (t : I params) => ret[x := t], generalizing the other
         // parameters when this is the top-level split of a recursive function
@@ -3841,12 +3902,11 @@ impl<'a> Cx<'a> {
         let ret_abs = abstract_fvars(&ret_z, &[x]);
         let lvl = from_kernel(self.tc.check_is_type(&motive_res), span)?;
         let lvl = self.tc.zonk_level(&lvl);
-        let rec_name = format!("{iname}.rec");
-        let large = match self.env.get(&rec_name) {
+        let large = match self.env.get(&root_info.rec) {
             Some(Decl::Rec(r)) => r.lparams.len() > ind_nlevels,
             _ => return err(span, "missing recursor"),
         };
-        let mut rec_levels = ilevels.clone();
+        let mut rec_levels = fam_levels.clone();
         if large {
             rec_levels.insert(0, lvl);
         } else if !lvl.is_zero() {
@@ -3865,19 +3925,37 @@ impl<'a> Cx<'a> {
         // a mutual family: the other types get the constant `PUnit` motive and
         // `PUnit.unit` minors, only this type's constructors carry real cases
         let mut motives_all: Vec<T> = Vec::new();
-        for (fi, fname) in family.iter().enumerate() {
+        let nested_tys: Vec<T> = nested
+            .iter()
+            .map(|n| {
+                let args: Vec<T> = n
+                    .args
+                    .iter()
+                    .map(|a| instantiate_many(a, &fam_params))
+                    .collect();
+                mk_apps(&cnst(n.ind.clone(), n.levels.clone()), &args)
+            })
+            .collect();
+        for mi in 0..family.len() + nested.len() {
             if let Some(ms) = &mutual_ms {
-                motives_all.push(ms[fi].clone());
-            } else if *fname == iname {
+                motives_all.push(ms[mi].clone());
+            } else if mi == target {
                 motives_all.push(motive.clone());
             } else {
-                let fty = from_kernel(self.env.const_type(fname, &ilevels), span)?;
-                let fty = from_kernel(self.tc.instantiate_pis(&fty, &params), span)?;
-                let (idx, _) = from_kernel(self.tc.telescope(&fty, None), span)?;
-                if !idx.is_empty() {
-                    return err(span, "matching on mutual indexed families is not supported");
-                }
-                let kt = mk_apps(&cnst(fname.as_str().into(), ilevels.clone()), &params);
+                let kt = if mi < family.len() {
+                    let fty = from_kernel(self.env.const_type(&family[mi], &fam_levels), span)?;
+                    let fty = from_kernel(self.tc.instantiate_pis(&fty, &fam_params), span)?;
+                    let (idx, _) = from_kernel(self.tc.telescope(&fty, None), span)?;
+                    if !idx.is_empty() {
+                        return err(span, "matching on mutual indexed families is not supported");
+                    }
+                    mk_apps(
+                        &cnst(family[mi].as_str().into(), fam_levels.clone()),
+                        &fam_params,
+                    )
+                } else {
+                    nested_tys[mi - family.len()].clone()
+                };
                 motives_all.push(lam(
                     Mult::Omega,
                     kt,
@@ -3886,7 +3964,7 @@ impl<'a> Cx<'a> {
             }
         }
         let mut rty = from_kernel(self.env.const_type(&info_rec, &rec_levels), span)?;
-        for p in params.iter().chain(motives_all.iter()) {
+        for p in fam_params.iter().chain(motives_all.iter()) {
             match &*rty {
                 Term::Pi(_, _, b) => rty = instantiate(b, p),
                 _ => return err(span, "internal error: malformed recursor type"),
@@ -3894,13 +3972,17 @@ impl<'a> Cx<'a> {
         }
 
         let mut minors = Vec::new();
-        for fname in &family {
-            if *fname != iname {
-                let fctors: Vec<String> = match self.env.get(fname) {
-                    Some(Decl::Inductive(i)) => i.ctors.iter().map(|c| c.to_string()).collect(),
-                    _ => return err(span, "internal error: missing family member"),
+        for mi in 0..family.len() + nested.len() {
+            if mi != target {
+                let nfc: usize = if mi < family.len() {
+                    match self.env.get(&family[mi]) {
+                        Some(Decl::Inductive(i)) => i.ctors.len(),
+                        _ => return err(span, "internal error: missing family member"),
+                    }
+                } else {
+                    nested[mi - family.len()].ctors.len()
                 };
-                for _ in &fctors {
+                for _ in 0..nfc {
                     let (dom, rest) = match &*rty {
                         Term::Pi(_, d, b) => (d.clone(), b.clone()),
                         _ => return err(span, "internal error: malformed recursor type"),
@@ -3938,11 +4020,18 @@ impl<'a> Cx<'a> {
                         continue;
                     }
                     let (xs, fbody) = from_kernel(self.tc.telescope(&fty, None), span)?;
-                    let fam_idx = match &*app_spine(&fbody).0 {
-                        Term::Const(n, _) => family.iter().position(|m| **n == **m),
+                    let (fhead, fargs) = app_spine(&fbody);
+                    let fam_idx = match &*fhead {
+                        Term::Const(n, _) => family.iter().position(|m| **n == **m).or_else(|| {
+                            nested
+                                .iter()
+                                .zip(&nested_tys)
+                                .position(|(nn, nt)| *nn.ind == **n && app_spine(nt).1 == fargs)
+                                .map(|k| family.len() + k)
+                        }),
                         _ => None,
                     };
-                    let own = fam_idx.is_some_and(|k| family[k] == iname);
+                    let own = fam_idx.is_some_and(|k| k < family.len() && family[k] == iname);
                     let applied =
                         mk_apps(&fvar(f), &xs.iter().map(|&v| fvar(v)).collect::<Vec<_>>());
                     let ih_res = match (&mutual_ms, fam_idx) {
@@ -4066,7 +4155,7 @@ impl<'a> Cx<'a> {
                 minors.push(m);
             }
         }
-        let mut args = params;
+        let mut args = fam_params.to_vec();
         args.extend(motives_all);
         args.extend(minors);
         args.push(fvar(x));

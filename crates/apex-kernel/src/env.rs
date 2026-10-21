@@ -34,6 +34,22 @@ pub struct IndInfo {
     pub rec: Name,
     /// All types of the mutual family this type belongs to, in declaration order.
     pub family: Vec<Name>,
+    /// Nested occurrences (`List Rose` in a field of `Rose`): after the family's own motives,
+    /// the recursor has one more motive and one minor per constructor for each of these.
+    pub nested: Vec<NestedInfo>,
+}
+
+/// An existing inductive type `ind args` used inside a field of the family being defined.
+#[derive(Clone)]
+pub struct NestedInfo {
+    /// The recursor for this occurrence (major premise of type `ind args`).
+    pub rec: Name,
+    pub ind: Name,
+    pub levels: Vec<Level>,
+    /// The parameters of `ind`, abstracted over the family's parameters (see `instantiate_many`).
+    pub args: Vec<T>,
+    /// The constructors of `ind`, in order.
+    pub ctors: Vec<Name>,
 }
 
 #[derive(Clone)]

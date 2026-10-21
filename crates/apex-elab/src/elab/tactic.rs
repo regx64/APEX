@@ -2187,6 +2187,19 @@ impl<'a> Cx<'a> {
                 ));
             }
         }
+        for n in &info.nested {
+            let args: Vec<T> = n
+                .args
+                .iter()
+                .map(|a| instantiate_many(a, &params))
+                .collect();
+            let nt = mk_apps(&cnst(n.ind.clone(), n.levels.clone()), &args);
+            motives_all.push(lam(
+                Mult::Omega,
+                nt,
+                cnst("PUnit".into(), vec![punit_lvl.clone()]),
+            ));
+        }
         debug_assert_eq!(motives_all.len(), rec_info.nmotives);
         let mut rty = from_kernel(self.env.const_type(&info.rec, &rec_levels), span)?;
         for p in params.iter().chain(motives_all.iter()) {
@@ -2306,6 +2319,19 @@ impl<'a> Cx<'a> {
                     Some(a) => arm_goals.push((sub, a.body.clone())),
                     None => goals.push(sub),
                 }
+            }
+        }
+        for n in &info.nested {
+            for _ in &n.ctors {
+                let (dom, rest) = match &*rty {
+                    Term::Pi(_, d, b) => (d.clone(), b.clone()),
+                    _ => return err(span, "internal error: malformed recursor type"),
+                };
+                let (bs, _) = from_kernel(self.tc.telescope(&head_beta(&dom), None), span)?;
+                let unit = cnst("PUnit.unit".into(), vec![punit_lvl.clone()]);
+                let m = self.tc.mk_lam(&bs, &unit);
+                rty = instantiate(&rest, &m);
+                minors.push(m);
             }
         }
         let mut args = params;

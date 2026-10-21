@@ -8,7 +8,7 @@
 
 ## A. 커널 완성
 - [x] A-1a 커널의 상호 귀납형 (`add_mutual`: 모티브/마이너 전체 공유, 재귀자별 ι-규칙; 테스트 `mutual_tree_forest_recursion_reduces`)
-- [~] A-1b 표면 문법 `mutual { enum .. enum .. }`, `match`/`cases`/`induction`(다른 타입의 모티브는 상수 `PUnit`), 상호 구조적 재귀 `mutual { fn .. fn .. }`(타입마다 함수 하나, 첫 매개변수로 감소, 공유 재귀자로 정의), 일반 `injection`/`contradiction`(생성자 불일치). 중첩 귀납형(`List<Tree>` 필드)은 아직 (커널의 보조 타입 번역 필요)
+- [x] A-1b 표면 문법 `mutual { enum .. enum .. }`, `match`/`cases`/`induction`, 상호 구조적 재귀 `mutual { fn .. fn .. }`(타입마다 함수 하나), 일반 `injection`/`contradiction`, **중첩 귀납형** (`enum Rose { Node(Nat, List<Rose>) }`, `Option<Json>`, `List<List<Deep>>`, 제네릭 `Tree<T>`): 커널이 Lean처럼 보조 타입(`Rose._nested1` = `List Rose`의 사본)을 가족에 넣어 재귀자를 만들고 `A ↦ J args`로 되돌린 뒤 다시 타입 검사한다. `List<Rose>` 위의 재귀 함수는 `mutual`에 `Rose`용과 `List<Rose>`용을 함께 쓴다. 한계: 중첩 대상에 인덱스가 있으면 안 되고, 화살표 아래 중첩(`Nat -> List<Rose>`)은 안 됨
 - [x] A-2 구조 η (필드 타입이 앞 필드에 의존하지 않는 구조체; 의존 구조체와 단위형 η는 아직)
 - [x] A-3 몫 `Quot` (mk/lift/ind/sound, lift 계산 규칙은 커널 whnf), 공리 `propext`/`Classical.choice`, `funext`는 Quot.sound에서 유도(공리 아님). 표면 문법 `forall(x: A) -> T` 추가
 - [x] A-4 인덱스 족: 표면 문법 `enum Even(n: Nat): Prop { Zero: Even(0), Add2<k: Nat>(Even(k)): Even(k + 2) }` / `enum Vec<T>(n: Nat) { .. }`, `induction`/`cases`가 인덱스를 추상화(변수가 아닌 인덱스는 등식 `heq_i`로 일반화). `match`(B-2)는 아직
