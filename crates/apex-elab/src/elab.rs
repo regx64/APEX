@@ -497,19 +497,26 @@ impl Elaborator {
             );
         }
         let (ty, val, mask) = if !recursive {
-            self.try_fn(f, span, None, None)?
+            self.try_fn(f, span, None, false, None)?
         } else {
             // structural recursion: try each parameter as the decreasing one
             let mut first_err = None;
             let mut found = None;
-            for k in 0..f.params.len() {
-                match self.try_fn(f, span, Some(k), None) {
-                    Ok(r) => {
-                        found = Some(r);
-                        break;
-                    }
-                    Err(e) => {
-                        first_err.get_or_insert(e);
+            // first plain structural recursion (direct fields), then course-of-values
+            // recursion through `brecOn`, which sees all deeper subterms
+            'search: for deep in [false, true] {
+                for k in 0..f.params.len() {
+                    match self.try_fn(f, span, Some(k), deep, None) {
+                        Ok(r) => {
+                            found = Some(r);
+                            break 'search;
+                        }
+                        Err(e) => {
+                            // the course-of-values attempt is the more capable one
+                            if deep && k == 0 || first_err.is_none() {
+                                first_err = Some(e);
+                            }
+                        }
                     }
                 }
             }
@@ -535,6 +542,7 @@ impl Elaborator {
         f: &FnDecl,
         span: Span,
         decr: Option<usize>,
+        deep: bool,
         self_ty: Option<&Expr>,
     ) -> R<(T, T, Vec<Bk>)> {
         let mut cx = self.cx();
@@ -567,12 +575,19 @@ impl Elaborator {
                 fields: HashMap::new(),
                 refined: Vec::new(),
                 in_top: false,
+                deep: None,
             });
         }
         let ret = match &f.ret {
             Some(t) => cx.elab_type(t)?,
             None => cx.unit_type(),
         };
+        if deep && cx.rec.is_some() {
+            let d = cx.setup_deep(&ret, f.name.span)?;
+            if let Some(rc) = cx.rec.as_mut() {
+                rc.deep = Some(d);
+            }
+        }
         let Some(block) = &f.body else {
             return err(f.name.span, "a function needs a body");
         };
@@ -583,6 +598,17 @@ impl Elaborator {
             let v = cx.coerce(v, &ret, block.span)?;
             cx.wrap_mut_result(&ret, &mvars, v)
         })?;
+        let body = match cx
+            .rec
+            .as_ref()
+            .and_then(|rc| rc.deep.clone().map(|d| (d, rc)))
+        {
+            Some((d, rc)) => {
+                let (decr, explicit) = (rc.decr, rc.explicit.clone());
+                cx.wrap_brec(&d, decr, &explicit, body)?
+            }
+            None => body,
+        };
         cx.borrow_check(f)?;
         Ok((
             cx.close(&fvs, &ret_full, true, span)?,
@@ -1098,7 +1124,7 @@ impl Elaborator {
                 body: f.body.clone(),
             };
             let callee = callee_of(&fd, &[]).map_err(sig_error)?;
-            let (ty, val, mask) = self.try_fn(&fd, span, None, Some(&d.self_ty))?;
+            let (ty, val, mask) = self.try_fn(&fd, span, None, false, Some(&d.self_ty))?;
             let kname = self.add_def_named(&fd.name, ty, val, mask)?;
             self.tables.sigs.insert(kname, callee);
         }
@@ -1132,6 +1158,22 @@ struct RecCtx {
     /// application, so recursive calls on it can still be recognized.
     refined: Vec<(T, u32)>,
     in_top: bool,
+    /// Course-of-values mode (`brecOn`), for recursion on deeper subterms.
+    deep: Option<Deep>,
+}
+
+/// State of a function compiled through `I.brecOn`: every recursive field in scope
+/// has a term of type `I.below motive field`, a tuple of the results for its subterms.
+#[derive(Clone)]
+struct Deep {
+    iname: String,
+    /// Universe arguments of `I.below` / `I.brecOn`: the motive's, then `I`'s.
+    levels: Vec<Level>,
+    params: Vec<T>,
+    motive: T,
+    /// The `below` argument of `brecOn`'s step function.
+    b: u32,
+    below_of: HashMap<u32, T>,
 }
 
 struct StructTele {
@@ -2977,7 +3019,13 @@ impl<'a> Cx<'a> {
 
         // motive: fun (t : I params) => ret[x := t], generalizing the other
         // parameters when this is the top-level split of a recursive function
-        let others: Vec<u32> = match (&self.rec, top) {
+        let deep_ctx: Option<(Deep, T)> = self.rec.as_ref().and_then(|rc| {
+            rc.deep
+                .as_ref()
+                .and_then(|d| d.below_of.get(&x).map(|bt| (d.clone(), bt.clone())))
+        });
+        let in_deep = self.rec.as_ref().is_some_and(|rc| rc.deep.is_some());
+        let others: Vec<u32> = match (&self.rec, top && !in_deep) {
             (Some(rc), true) => rc
                 .explicit
                 .iter()
@@ -2988,7 +3036,13 @@ impl<'a> Cx<'a> {
         };
         self.tc.zonk_locals();
         let ret_z = self.tc.zonk(ret);
-        let motive_res = self.tc.mk_pi(&others, &ret_z);
+        // course-of-values mode: the motive also takes the `below` tuple of the scrutinee
+        let bq = deep_ctx.as_ref().map(|(d, _)| {
+            let ty = self.below_type(d, fvar(x));
+            self.tc.fresh("b", ty, Mult::Omega)
+        });
+        let gen: Vec<u32> = bq.into_iter().chain(others.iter().copied()).collect();
+        let motive_res = self.tc.mk_pi(&gen, &ret_z);
         let motive_abs = abstract_fvars(&motive_res, &[x]);
         let ret_abs = abstract_fvars(&ret_z, &[x]);
         let lvl = from_kernel(self.tc.check_is_type(&motive_res), span)?;
@@ -3033,12 +3087,39 @@ impl<'a> Cx<'a> {
                 let ih_res = instantiate(&motive_abs, &applied);
                 let ih_ty = self.tc.mk_pi(&xs, &ih_res);
                 let ih = self.tc.fresh("ih", ih_ty, Mult::Omega);
-                if top {
+                if top && !in_deep {
                     if let Some(rc) = &mut self.rec {
                         rc.fields.insert(f, fvar(ih));
                     }
                 }
                 ihs.push(ih);
+            }
+
+            // course-of-values: the results for the subterms come out of `below`
+            let mut cb = None;
+            if let Some((d, _)) = &deep_ctx {
+                let rec_fields: Vec<u32> = {
+                    let mut v = Vec::new();
+                    for &f in &fields {
+                        let fty = from_kernel(self.tc.local_ty(f), span)?;
+                        if contains_const(&fty, &iname) {
+                            v.push(f);
+                        }
+                    }
+                    v
+                };
+                let b2_ty = self.below_type(d, ctor_app.clone());
+                let b2 = self.tc.fresh("b", b2_ty, Mult::Omega);
+                let comps = self.below_components(b2, rec_fields.len(), span)?;
+                if let Some(rc) = &mut self.rec {
+                    for (f, (ih, bt)) in rec_fields.iter().zip(comps) {
+                        rc.fields.insert(*f, ih);
+                        if let Some(dd) = &mut rc.deep {
+                            dd.below_of.insert(*f, bt);
+                        }
+                    }
+                }
+                cb = Some(b2);
             }
 
             // specialize the rows to this constructor
@@ -3096,10 +3177,14 @@ impl<'a> Cx<'a> {
             let sub = sub?;
             self.tc.zonk_locals();
             let sub = self.tc.zonk(&sub);
-            let body = if top {
+            let body = if top || !others.is_empty() {
                 self.tc.mk_lam(&others, &sub)
             } else {
                 sub
+            };
+            let body = match cb {
+                Some(b2) => self.tc.mk_lam(&[b2], &body),
+                None => body,
             };
             let binders: Vec<u32> = fields.iter().chain(&ihs).copied().collect();
             minors.push(self.tc.mk_lam(&binders, &body));
@@ -3108,8 +3193,167 @@ impl<'a> Cx<'a> {
         args.push(motive);
         args.extend(minors);
         args.push(fvar(x));
+        if let Some((_, bt)) = &deep_ctx {
+            args.push(bt.clone());
+        }
         args.extend(others.iter().map(|&o| fvar(o)));
         Ok(mk_apps(&cnst(rec_name.as_str().into(), rec_levels), &args))
+    }
+
+    /// Prepare course-of-values recursion on the decreasing parameter.
+    fn setup_deep(&mut self, ret: &T, span: Span) -> R<Deep> {
+        let rc = self.rec.as_ref().expect("recursion context");
+        let (decr, explicit) = (rc.decr, rc.explicit.clone());
+        let xty = from_kernel(self.tc.local_ty(decr), span)?;
+        let xty = self.tc.zonk(&xty);
+        let w = from_kernel(self.tc.whnf(&xty), span)?;
+        let (h, targs) = app_spine(&w);
+        let Term::Const(iname, ilevels) = &*h else {
+            return err(span, "cannot recurse on this parameter");
+        };
+        let iname = iname.to_string();
+        let nparams = match self.env.get(&iname) {
+            Some(Decl::Inductive(i)) => i.nparams,
+            _ => return err(span, "cannot recurse on this parameter"),
+        };
+        if self.env.get(&format!("{iname}.brecOn")).is_none() {
+            return err(
+                span,
+                format!("`{iname}` has no course-of-values recursor (indexed, mutual or nested?)"),
+            );
+        }
+        let others: Vec<u32> = explicit.iter().copied().filter(|&p| p != decr).collect();
+        self.tc.zonk_locals();
+        let ret_z = self.tc.zonk(ret);
+        let motive_res = self.tc.mk_pi(&others, &ret_z);
+        let lvl = from_kernel(self.tc.check_is_type(&motive_res), span)?;
+        let lvl = self.tc.zonk_level(&lvl);
+        let motive = lam(
+            Mult::Omega,
+            xty.clone(),
+            abstract_fvars(&motive_res, &[decr]),
+        );
+        let mut levels = vec![lvl];
+        levels.extend(ilevels.iter().cloned());
+        let params = targs[..nparams].to_vec();
+        let mut d = Deep {
+            iname,
+            levels,
+            params,
+            motive,
+            b: 0,
+            below_of: HashMap::new(),
+        };
+        let below_ty = self.below_type(&d, fvar(decr));
+        d.b = self.tc.fresh("b", below_ty, Mult::Omega);
+        d.below_of.insert(decr, fvar(d.b));
+        Ok(d)
+    }
+
+    /// `I.below motive v`.
+    fn below_type(&self, d: &Deep, v: T) -> T {
+        mk_apps(
+            &cnst(
+                format!("{}.below", d.iname).as_str().into(),
+                d.levels.clone(),
+            ),
+            &[d.params.clone(), vec![d.motive.clone(), v]].concat(),
+        )
+    }
+
+    /// `f x others := I.brecOn x (fun x b others => body) others`.
+    fn wrap_brec(&mut self, d: &Deep, decr: u32, explicit: &[u32], body: T) -> R<T> {
+        let others: Vec<u32> = explicit.iter().copied().filter(|&p| p != decr).collect();
+        self.tc.zonk_locals();
+        let body = self.tc.zonk(&body);
+        let step = self
+            .tc
+            .mk_lam(&[vec![decr, d.b], others.clone()].concat(), &body);
+        let args = [
+            d.params.clone(),
+            vec![d.motive.clone(), fvar(decr), step],
+            others.iter().map(|&o| fvar(o)).collect(),
+        ]
+        .concat();
+        Ok(mk_apps(
+            &cnst(
+                format!("{}.brecOn", d.iname).as_str().into(),
+                d.levels.clone(),
+            ),
+            &args,
+        ))
+    }
+
+    /// Split `b : below motive (c fields)` into the (result, below) pair of each
+    /// recursive field, in order.
+    fn below_components(&mut self, b: u32, n: usize, span: Span) -> R<Vec<(T, T)>> {
+        let mut cur = fvar(b);
+        let mut out = Vec::new();
+        let pprod = |ls: &[Level], name: &str| cnst(name.into(), ls.to_vec());
+        for _ in 0..n {
+            let ty = from_kernel(self.tc.infer(&cur), span)?;
+            let w = from_kernel(self.tc.whnf(&ty), span)?;
+            let (h, args) = app_spine(&w);
+            let (Term::Const(c, ls), 2) = (&*h, args.len()) else {
+                return err(span, "internal error: `below` is not a tuple");
+            };
+            if &**c != "PProd" {
+                return err(span, "internal error: `below` is not a tuple");
+            }
+            let pair = mk_apps(
+                &pprod(ls, "PProd.fst"),
+                &[args[0].clone(), args[1].clone(), cur.clone()],
+            );
+            let rest = mk_apps(
+                &pprod(ls, "PProd.snd"),
+                &[args[0].clone(), args[1].clone(), cur.clone()],
+            );
+            let pty = from_kernel(self.tc.infer(&pair), span)?;
+            let pw = from_kernel(self.tc.whnf(&pty), span)?;
+            let (ph, pargs) = app_spine(&pw);
+            let (Term::Const(pc, pls), 2) = (&*ph, pargs.len()) else {
+                return err(span, "internal error: `below` element is not a pair");
+            };
+            if &**pc != "PProd" {
+                return err(span, "internal error: `below` element is not a pair");
+            }
+            let ih = mk_apps(
+                &pprod(pls, "PProd.fst"),
+                &[pargs[0].clone(), pargs[1].clone(), pair.clone()],
+            );
+            let bt = mk_apps(
+                &pprod(pls, "PProd.snd"),
+                &[pargs[0].clone(), pargs[1].clone(), pair],
+            );
+            out.push((ih, bt));
+            cur = rest;
+        }
+        Ok(out)
+    }
+
+    /// Rewrite constructor applications that a nested `match` introduced back to the
+    /// field variables they stand for, innermost first: `succ(succ(m))` becomes the
+    /// field bound by the outer split when `succ(m)` is the inner field.
+    fn canon_fields(&self, t: &T) -> T {
+        let refined: Vec<(T, u32)> = match &self.rec {
+            Some(rc) => rc
+                .refined
+                .iter()
+                .map(|(c, x)| (self.tc.zonk(c), *x))
+                .collect(),
+            None => return t.clone(),
+        };
+        fn go(t: &T, refined: &[(T, u32)]) -> T {
+            let t2 = match &**t {
+                Term::App(f, a) => app(go(f, refined), go(a, refined)),
+                _ => t.clone(),
+            };
+            match refined.iter().find(|(c, _)| *c == t2) {
+                Some((_, x)) => fvar(*x),
+                None => t2,
+            }
+        }
+        go(t, &refined)
     }
 
     /// `f(args)` inside the body of a structurally recursive `f`: becomes the
@@ -3130,6 +3374,7 @@ impl<'a> Cx<'a> {
         let dty = from_kernel(self.tc.local_ty(decr), span)?;
         let arg = self.elab_check(&args[k], &dty)?;
         let arg = self.tc.zonk(&arg);
+        let arg = self.canon_fields(&arg);
         let ih = self.rec.as_ref().and_then(|rc| match &*arg {
             Term::FVar(f) => rc.fields.get(f).cloned(),
             _ => rc

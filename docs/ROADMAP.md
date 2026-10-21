@@ -15,7 +15,7 @@
 - [ ] A-5 `Nat`/`Int`/`String` 리터럴 가속(GMP급), 독립 검증기
 
 ## B. 엘라보레이터
-- [ ] B-1a 구조적 재귀의 일반화: `T.below`/`T.brecOn` 생성 + 임의 깊이 하위 항 재귀 (`fib(m)+fib(m+1)`)
+- [x] B-1a 구조적 재귀의 일반화: 커널이 `T.below`/`T.brecOn`을 생성(인덱스 없는 단순 귀납형), 엘라보레이터는 직접 필드 재귀가 안 되면 brecOn 모드로 재시도 (`fib(m)+fib(m+1)`, 3단계 깊이, 리스트 두 칸 건너뛰기). 한계: 인덱스/상호/중첩/선형 필드 타입, 고차 재귀 필드는 brecOn이 없음
 - [ ] B-1b 잘 정초된 재귀 + `termination_by`/`decreasing_by` (`Acc`, `WellFounded.fix`; `omega` 필요)
 - [ ] B-2 종속 패턴 매칭 (motive 일반화, 인덱스 족 `match`)
 - [ ] B-3 `namespace`/`open`/`section`/`variable`/`universe`
