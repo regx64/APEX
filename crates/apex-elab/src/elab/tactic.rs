@@ -487,8 +487,8 @@ impl<'a> Cx<'a> {
                 self.solve(st, &g, app(lam_mv, pf));
                 Ok(vec![ng])
             }
-            TacticKind::Rw(rules) => self.t_rw(st, g, rules, span),
-            TacticKind::Simp(lemmas) => self.t_simp(st, g, lemmas, span),
+            TacticKind::Rw(rules, at) => self.t_rw(st, g, rules, at.as_ref(), span),
+            TacticKind::Simp(lemmas, at) => self.t_simp(st, g, lemmas, at.as_ref(), span),
             TacticKind::Unfold(names) => {
                 let mut tgt = self.tc.zonk(&g.target);
                 for n in names {
@@ -501,8 +501,17 @@ impl<'a> Cx<'a> {
                 }
                 Ok(vec![ng])
             }
-            TacticKind::Induction(x, arms) => self.t_induct(st, g, x, arms.as_deref(), true, span),
-            TacticKind::Cases(x, arms) => self.t_induct(st, g, x, arms.as_deref(), false, span),
+            TacticKind::Induction(x, gen, arms) => {
+                self.t_induct(st, g, x, gen, arms.as_deref(), true, span)
+            }
+            TacticKind::Revert(names) => {
+                let (ng, _) = self.revert_vars(st, &g, names, span)?;
+                Ok(vec![ng])
+            }
+            TacticKind::Exists(e) => self.t_exists(st, g, e, span),
+            TacticKind::Cases(x, arms) => {
+                self.t_induct(st, g, x, &[], arms.as_deref(), false, span)
+            }
         }
     }
 
@@ -868,9 +877,33 @@ impl<'a> Cx<'a> {
         g: &Goal,
         rule: &OpenRule,
         rev: bool,
+        at: Option<&Ident>,
         span: Span,
     ) -> R<Option<(Goal, Vec<Goal>)>> {
-        let tgt = self.tc.zonk(&g.target);
+        // the type being rewritten: the goal, or a hypothesis
+        let hyp = match at {
+            Some(h) => {
+                let pos = g
+                    .scope
+                    .iter()
+                    .rposition(|(n, _)| plain_name(n) == h.name)
+                    .ok_or_else(|| {
+                        ElabError::new(h.span, format!("unknown hypothesis `{}`", h.name))
+                    })?;
+                let Term::FVar(id) = &*g.scope[pos].1 else {
+                    return err(h.span, format!("`{}` is not a hypothesis", h.name));
+                };
+                Some((pos, *id, h.name.clone()))
+            }
+            None => None,
+        };
+        let tgt = match &hyp {
+            Some((_, id, _)) => {
+                let ty = from_kernel(self.tc.local_ty(*id), span)?;
+                self.tc.zonk(&ty)
+            }
+            None => self.tc.zonk(&g.target),
+        };
         let (pat, rep) = if rev {
             (&rule.rhs, &rule.lhs)
         } else {
@@ -891,6 +924,37 @@ impl<'a> Cx<'a> {
         let alpha = self.tc.zonk(&rule.alpha);
         let motive = lam(Mult::Omega, alpha.clone(), body);
         let proof = self.tc.zonk(&rule.proof);
+        if let Some((pos, id, name)) = hyp {
+            // hypothesis `h : motive pat` becomes `h : motive rep`, using `pat = rep`
+            let pe = if rev {
+                mk_apps(
+                    &cnst("Eq.symm".into(), vec![rule.level.clone()]),
+                    &[alpha.clone(), rep.clone(), pat.clone(), proof],
+                )
+            } else {
+                proof
+            };
+            let new_h = self.tc.fresh(&name, new_target, Mult::Omega);
+            let mut ng = self.new_goal(g, g.target.clone(), "");
+            ng.scope[pos] = (name, fvar(new_h));
+            let term_h = mk_apps(
+                &cnst("Eq.subst".into(), vec![rule.level.clone()]),
+                &[alpha, pat, rep, motive, pe, fvar(id)],
+            );
+            if let Err(e) = self.tc.infer(&term_h) {
+                return err(
+                    span,
+                    format!("rewrite produced an ill-typed motive: {}", e.0),
+                );
+            }
+            let new_ty = from_kernel(self.tc.local_ty(new_h), span)?;
+            let lam_mv = self.tc.new_mvar(pi(Mult::Omega, new_ty, g.target.clone()));
+            st.sol
+                .insert(mvar_id(&lam_mv), Sol::Lam(vec![new_h], ng.mv));
+            let side = self.side_goals(g, rule, span)?;
+            self.solve(st, g, app(lam_mv, term_h));
+            return Ok(Some((ng, side)));
+        }
         // goal = motive pat, from motive rep, with `rep = pat`
         let qp = if rev {
             proof
@@ -911,6 +975,13 @@ impl<'a> Cx<'a> {
                 format!("rewrite produced an ill-typed motive: {}", e.0),
             );
         }
+        let side = self.side_goals(g, rule, span)?;
+        self.solve(st, g, term);
+        Ok(Some((ng, side)))
+    }
+
+    /// The hypotheses of a conditional rewrite rule that unification left open.
+    fn side_goals(&mut self, g: &Goal, rule: &OpenRule, span: Span) -> R<Vec<Goal>> {
         let mut side = Vec::new();
         for a in &rule.args {
             if let Term::MVar(_) = &*self.tc.zonk(a) {
@@ -924,17 +995,23 @@ impl<'a> Cx<'a> {
                 });
             }
         }
-        self.solve(st, g, term);
-        Ok(Some((ng, side)))
+        Ok(side)
     }
 
-    fn t_rw(&mut self, st: &mut Tac, g: Goal, rules: &[(bool, Expr)], span: Span) -> R<Vec<Goal>> {
+    fn t_rw(
+        &mut self,
+        st: &mut Tac,
+        g: Goal,
+        rules: &[(bool, Expr)],
+        at: Option<&Ident>,
+        span: Span,
+    ) -> R<Vec<Goal>> {
         let mut cur = g;
         let mut sides = Vec::new();
         for (rev, e) in rules {
             let h = self.elab_in_goal(e, None)?;
             let rule = self.open_rule(&h, e.span)?;
-            match self.rewrite_once(st, &cur, &rule, *rev, e.span)? {
+            match self.rewrite_once(st, &cur, &rule, *rev, at, e.span)? {
                 Some((ng, side)) => {
                     cur = ng;
                     sides.extend(side);
@@ -944,15 +1021,20 @@ impl<'a> Cx<'a> {
                     return err(
                         e.span,
                         format!(
-                            "`rw` failed: did not find an instance of the pattern `{}` in the goal",
-                            self.pp(pat)
+                            "`rw` failed: did not find an instance of the pattern `{}` in {}",
+                            self.pp(pat),
+                            if at.is_some() {
+                                "the hypothesis"
+                            } else {
+                                "the goal"
+                            }
                         ),
                     );
                 }
             }
         }
         let _ = span;
-        if self.try_rfl(st, &cur) {
+        if at.is_none() && self.try_rfl(st, &cur) {
             return Ok(sides);
         }
         let mut out = vec![cur];
@@ -960,7 +1042,14 @@ impl<'a> Cx<'a> {
         Ok(out)
     }
 
-    fn t_simp(&mut self, st: &mut Tac, g: Goal, lemmas: &[Expr], span: Span) -> R<Vec<Goal>> {
+    fn t_simp(
+        &mut self,
+        st: &mut Tac,
+        g: Goal,
+        lemmas: &[Expr],
+        at: Option<&Ident>,
+        span: Span,
+    ) -> R<Vec<Goal>> {
         enum Rule {
             Term(T),
             Global(String),
@@ -988,6 +1077,69 @@ impl<'a> Cx<'a> {
         }
         let mut cur = g;
         let mut progress = false;
+        if let Some(h) = at {
+            // simplify a hypothesis; a hypothesis that becomes `False` closes the goal
+            let mut sides = Vec::new();
+            for _ in 0..500 {
+                let mut next = None;
+                for r in &rules {
+                    let hterm = match r {
+                        Rule::Term(h) => h.clone(),
+                        Rule::Global(n) => self.const_term(n).0,
+                        Rule::Unfold(_) => continue,
+                    };
+                    let snap = self.tc.snapshot();
+                    let rule = self.open_rule(&hterm, span)?;
+                    if let Some((ng, side)) =
+                        self.rewrite_once(st, &cur, &rule, false, Some(h), span)?
+                    {
+                        let determined = rule
+                            .args
+                            .iter()
+                            .all(|a| !matches!(&*self.tc.zonk(a), Term::MVar(_)));
+                        if determined && side.is_empty() {
+                            next = Some(ng);
+                            break;
+                        }
+                        for s in &side {
+                            st.sol.remove(&s.mv);
+                        }
+                    }
+                    self.tc.restore(snap);
+                }
+                match next {
+                    Some(ng) => {
+                        cur = ng;
+                        progress = true;
+                    }
+                    None => break,
+                }
+            }
+            if !progress {
+                return err(span, "`simp` made no progress");
+            }
+            let hv = cur
+                .scope
+                .iter()
+                .rev()
+                .find(|(n, _)| plain_name(n) == h.name)
+                .map(|(_, v)| v.clone());
+            if let Some(hv) = hv {
+                if let Term::FVar(id) = &*hv {
+                    let ty = from_kernel(self.tc.local_ty(*id), span)?;
+                    let w = from_kernel(self.tc.whnf(&ty), span)?;
+                    if matches!(&*w, Term::Const(n, _) if &**n == "False") {
+                        let tgt = self.tc.zonk(&cur.target);
+                        let lvl = self.sort_level_of(&tgt, span)?;
+                        let pf = mk_apps(&cnst("False.elim".into(), vec![lvl]), &[tgt, hv]);
+                        self.solve(st, &cur, pf);
+                        return Ok(sides);
+                    }
+                }
+            }
+            sides.insert(0, cur);
+            return Ok(sides);
+        }
         for _ in 0..500 {
             if self.try_rfl(st, &cur) {
                 return Ok(vec![]);
@@ -1018,7 +1170,9 @@ impl<'a> Cx<'a> {
                         };
                         let rule = self.open_rule(&h, span)?;
                         // try the rule left to right
-                        if let Some((ng, side)) = self.rewrite_once(st, &cur, &rule, false, span)? {
+                        if let Some((ng, side)) =
+                            self.rewrite_once(st, &cur, &rule, false, None, span)?
+                        {
                             // only unconditional rewrites: every argument must be determined
                             let determined = rule
                                 .args
@@ -1078,8 +1232,155 @@ impl<'a> Cx<'a> {
         st: &mut Tac,
         g: Goal,
         var: &Ident,
+        generalizing: &[Ident],
         arms: Option<&[CaseArm]>,
         with_ih: bool,
+        span: Span,
+    ) -> R<Vec<Goal>> {
+        // hypotheses that mention the variable are reverted too, and put back in each case
+        let mut to_revert: Vec<Ident> = generalizing.to_vec();
+        if let Some(Term::FVar(xid)) = g
+            .scope
+            .iter()
+            .rfind(|(n, _)| plain_name(n) == var.name)
+            .map(|(_, v)| &**v)
+        {
+            for (n, v) in &g.scope {
+                if let Term::FVar(id) = &**v {
+                    if id != xid
+                        && self
+                            .tc
+                            .local_ty(*id)
+                            .is_ok_and(|ty| contains_fvar(&self.tc.zonk(&ty), *xid))
+                        && !to_revert.iter().any(|r| r.name == plain_name(n))
+                    {
+                        to_revert.push(Ident {
+                            name: plain_name(n).to_string(),
+                            span: var.span,
+                        });
+                    }
+                }
+            }
+        }
+        if !to_revert.is_empty() {
+            let (g2, names) = self.revert_vars(st, &g, &to_revert, span)?;
+            return self.t_induct_core(st, g2, var, arms, with_ih, &names, span);
+        }
+        self.t_induct_core(st, g, var, arms, with_ih, &[], span)
+    }
+
+    /// Put the hypotheses `names` (reverted before the split) back in a new case.
+    fn reintro(&mut self, st: &mut Tac, g: Goal, names: &[String], span: Span) -> R<Goal> {
+        if names.is_empty() {
+            return Ok(g);
+        }
+        let idents: Vec<Ident> = names
+            .iter()
+            .map(|n| Ident {
+                name: n.clone(),
+                span,
+            })
+            .collect();
+        let mut gs = self.t_intro(st, g, &idents, span)?;
+        Ok(gs.remove(0))
+    }
+
+    /// `revert a b`: the goal becomes `∀ a b, goal`, together with everything that
+    /// depends on `a` or `b`. Returns the new goal and the reverted names, oldest first.
+    fn revert_vars(
+        &mut self,
+        st: &mut Tac,
+        g: &Goal,
+        names: &[Ident],
+        span: Span,
+    ) -> R<(Goal, Vec<String>)> {
+        let mut ids: Vec<u32> = Vec::new();
+        for n in names {
+            let (_, v) = g
+                .scope
+                .iter()
+                .rfind(|(m, _)| plain_name(m) == n.name)
+                .ok_or_else(|| ElabError::new(n.span, format!("unknown variable `{}`", n.name)))?;
+            match &**v {
+                Term::FVar(id) => ids.push(*id),
+                _ => return err(n.span, format!("`{}` cannot be reverted", n.name)),
+            }
+        }
+        loop {
+            let mut grew = false;
+            for (_, v) in &g.scope {
+                if let Term::FVar(id) = &**v {
+                    if !ids.contains(id)
+                        && self.tc.local_ty(*id).is_ok_and(|ty| {
+                            let ty = self.tc.zonk(&ty);
+                            ids.iter().any(|r| contains_fvar(&ty, *r))
+                        })
+                    {
+                        ids.push(*id);
+                        grew = true;
+                    }
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        let mut fvs = Vec::new();
+        let mut out_names = Vec::new();
+        let mut scope = Vec::new();
+        for (n, v) in &g.scope {
+            match &**v {
+                Term::FVar(id) if ids.contains(id) => {
+                    fvs.push(*id);
+                    out_names.push(plain_name(n).to_string());
+                }
+                _ => scope.push((n.clone(), v.clone())),
+            }
+        }
+        self.tc.zonk_locals();
+        let tgt = self.tc.zonk(&g.target);
+        let new_target = self.tc.mk_pi(&fvs, &tgt);
+        let mut ng = self.new_goal(g, new_target, "");
+        ng.scope = scope;
+        let args: Vec<T> = fvs.iter().map(|&f| fvar(f)).collect();
+        self.solve(st, g, mk_apps(&mvar(ng.mv), &args));
+        let _ = span;
+        Ok((ng, out_names))
+    }
+
+    fn t_exists(&mut self, st: &mut Tac, g: Goal, e: &Expr, span: Span) -> R<Vec<Goal>> {
+        let tgt = self.tc.zonk(&g.target);
+        let w = from_kernel(self.tc.whnf(&tgt), span)?;
+        let (h, args) = app_spine(&w);
+        let (Term::Const(n, ls), 2) = (&*h, args.len()) else {
+            return err(span, "`exists` needs a goal of the form `Exists(p)`");
+        };
+        if &**n != "Exists" {
+            return err(span, "`exists` needs a goal of the form `Exists(p)`");
+        }
+        let witness = self.elab_in_goal(e, Some(&args[0]))?;
+        let body = head_beta(&app(args[1].clone(), witness.clone()));
+        let ng = self.new_goal(&g, body, "");
+        let pf = mk_apps(
+            &cnst("Exists.intro".into(), ls.clone()),
+            &[args[0].clone(), args[1].clone(), witness, mvar(ng.mv)],
+        );
+        self.solve(st, &g, pf);
+        if self.try_rfl(st, &ng) {
+            return Ok(vec![]);
+        }
+        Ok(vec![ng])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn t_induct_core(
+        &mut self,
+        st: &mut Tac,
+        g: Goal,
+        var: &Ident,
+        arms: Option<&[CaseArm]>,
+        with_ih: bool,
+        reintro: &[String],
         span: Span,
     ) -> R<Vec<Goal>> {
         let what = if with_ih { "induction" } else { "cases" };
@@ -1124,24 +1425,6 @@ impl<'a> Cx<'a> {
                 var.span,
                 format!("`{what}` on indexed families is not supported yet"),
             );
-        }
-        for (n, v) in &g.scope {
-            if let Term::FVar(id) = &**v {
-                if *id != xid {
-                    if let Ok(ty) = self.tc.local_ty(*id) {
-                        if contains_fvar(&self.tc.zonk(&ty), xid) {
-                            return err(
-                                var.span,
-                                format!(
-                                    "`{what}`: hypothesis `{n}` depends on `{}`; \
-                                     state the goal for all values first",
-                                    var.name
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
         }
         let rec_info = match self.env.get(&info.rec) {
             Some(Decl::Rec(r)) => r.clone(),
@@ -1251,8 +1534,10 @@ impl<'a> Cx<'a> {
                 target: new_target,
                 tag: ctor_short[i].clone(),
             };
+            let sub_mv = sub.mv;
+            let sub = self.reintro(st, sub, reintro, span)?;
             let lam_mv = self.tc.new_mvar(dom);
-            st.sol.insert(mvar_id(&lam_mv), Sol::Lam(fvs, sub.mv));
+            st.sol.insert(mvar_id(&lam_mv), Sol::Lam(fvs, sub_mv));
             minors.push(lam_mv.clone());
             rty = instantiate(&rest, &lam_mv);
             match arm {

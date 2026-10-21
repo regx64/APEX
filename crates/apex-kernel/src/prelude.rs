@@ -600,6 +600,41 @@ fn add_logic(env: &mut Env) -> KResult<()> {
             ("Or.inr".into(), or_ctor(false)?),
         ],
     })?;
+    // inductive Exists.{u} {α : Sort u} (p : α → Prop) : Prop | intro (w : α) (h : p w)
+    env.add_inductive(InductiveDecl {
+        name: "Exists".into(),
+        lparams: vec!["u".into()],
+        nparams: 2,
+        ty: pi_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            pi_m(Mult::Zero, "p", arrow(v("α"), prop()), prop()),
+        )
+        .build()?,
+        ctors: vec![(
+            "Exists.intro".into(),
+            pi_m(
+                Mult::Zero,
+                "α",
+                sort_(u.clone()),
+                pi_m(
+                    Mult::Zero,
+                    "p",
+                    arrow(v("α"), prop()),
+                    pi_(
+                        "w",
+                        v("α"),
+                        arrow(
+                            app_(v("p"), vec![v("w")]),
+                            app_(cl("Exists", vec![u.clone()]), vec![v("α"), v("p")]),
+                        ),
+                    ),
+                ),
+            )
+            .build()?,
+        )],
+    })?;
     // And.left / And.right
     for (name, left) in [("And.left", true), ("And.right", false)] {
         let ab = || app_(c("And"), vec![v("a"), v("b")]);

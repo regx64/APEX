@@ -401,6 +401,8 @@ impl Elaborator {
             ("Or", vec![Exp, Exp]),
             ("Or.inl", vec![Imp, Imp, Exp]),
             ("Or.inr", vec![Imp, Imp, Exp]),
+            ("Exists", vec![Imp, Exp]),
+            ("Exists.intro", vec![Imp, Imp, Exp, Exp]),
         ] {
             masks.insert(n.into(), m);
         }

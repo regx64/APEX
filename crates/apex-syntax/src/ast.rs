@@ -262,11 +262,16 @@ pub enum TacticKind {
         proof: HaveProof,
     },
     /// Rewrite rules; `true` means right-to-left (`<- h`).
-    Rw(Vec<(bool, Expr)>),
-    Simp(Vec<Expr>),
+    Rw(Vec<(bool, Expr)>, Option<Ident>),
+    Simp(Vec<Expr>, Option<Ident>),
     Unfold(Vec<Ident>),
-    Induction(Ident, Option<Vec<CaseArm>>),
+    /// `induction x generalizing a b with { .. }`
+    Induction(Ident, Vec<Ident>, Option<Vec<CaseArm>>),
     Cases(Ident, Option<Vec<CaseArm>>),
+    /// Move hypotheses back into the goal as premises.
+    Revert(Vec<Ident>),
+    /// `exists w`: prove `Exists p` by giving the witness.
+    Exists(Expr),
     /// `{ ... }`: run on the first goal, which it must close.
     Block(Vec<Tactic>),
 }

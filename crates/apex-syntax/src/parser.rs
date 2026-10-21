@@ -71,6 +71,11 @@ const TACTIC_WORDS: &[&str] = &[
     "unfold",
     "induction",
     "cases",
+    "revert",
+    "exists",
+    "generalizing",
+    "with",
+    "at",
 ];
 
 struct Parser {
@@ -154,6 +159,17 @@ impl Parser {
                 return Ok(out);
             }
             out.push(self.tactic()?);
+        }
+    }
+
+    /// An optional `at h` after `rw [..]` / `simp [..]`.
+    fn at_clause(&mut self) -> PResult<Option<Ident>> {
+        match self.peek() {
+            T::Ident(w) if w == "at" => {
+                self.bump();
+                Ok(Some(self.ident()?))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -268,7 +284,7 @@ impl Parser {
                     }
                 }
                 self.expect(&T::RBracket)?;
-                K::Rw(rules)
+                K::Rw(rules, self.at_clause()?)
             }
             "simp" => {
                 let mut lemmas = Vec::new();
@@ -281,7 +297,7 @@ impl Parser {
                     }
                     self.expect(&T::RBracket)?;
                 }
-                K::Simp(lemmas)
+                K::Simp(lemmas, self.at_clause()?)
             }
             "unfold" => {
                 let names = self.binder_names()?;
@@ -292,8 +308,23 @@ impl Parser {
             }
             "induction" => {
                 let v = self.ident()?;
-                K::Induction(v, self.case_arms()?)
+                let gen = match self.peek() {
+                    T::Ident(w) if w == "generalizing" => {
+                        self.bump();
+                        self.binder_names()?
+                    }
+                    _ => Vec::new(),
+                };
+                K::Induction(v, gen, self.case_arms()?)
             }
+            "revert" => {
+                let names = self.binder_names()?;
+                if names.is_empty() {
+                    return self.err("`revert` needs at least one name");
+                }
+                K::Revert(names)
+            }
+            "exists" => K::Exists(self.expr()?),
             "cases" => {
                 let v = self.ident()?;
                 K::Cases(v, self.case_arms()?)
@@ -1078,12 +1109,12 @@ mod tests {
         use TacticKind as K;
         let ts = tactics("intro a b; rw [h, <- g]\n simp [ih]\n exact foo(a)\n rfl");
         assert!(matches!(&ts[0].kind, K::Intro(v) if v.len() == 2));
-        assert!(matches!(&ts[1].kind, K::Rw(r) if r.len() == 2 && !r[0].0 && r[1].0));
-        assert!(matches!(&ts[2].kind, K::Simp(l) if l.len() == 1));
+        assert!(matches!(&ts[1].kind, K::Rw(r, None) if r.len() == 2 && !r[0].0 && r[1].0));
+        assert!(matches!(&ts[2].kind, K::Simp(l, None) if l.len() == 1));
         assert!(matches!(&ts[3].kind, K::Exact(_)));
         assert!(matches!(&ts[4].kind, K::Rfl));
         let ts = tactics("induction n with { zero => { rfl }, succ(m, ih) => { simp [ih] } }");
-        let K::Induction(v, Some(arms)) = &ts[0].kind else {
+        let K::Induction(v, _, Some(arms)) = &ts[0].kind else {
             panic!()
         };
         assert_eq!(v.name, "n");
