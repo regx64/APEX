@@ -521,6 +521,24 @@ impl Elaborator {
         }
     }
 
+    /// Load the elementary number theory library.
+    pub fn load_math(&mut self) {
+        if self.env.get("gauss").is_none() {
+            self.load_std();
+            self.load_ring();
+            self.load_lib("math", include_str!("prelude_math.apex"));
+        }
+    }
+
+    /// Load `Array`, `Map` and the extra `Nat` functions (needs `Option`, lists and omega).
+    pub fn load_std(&mut self) {
+        if self.env.get("array_push").is_none() {
+            self.load_data();
+            self.load_omega();
+            self.load_lib("std", include_str!("prelude_std.apex"));
+        }
+    }
+
     /// Load `Option`, `Subtype` and `Sigma`.
     pub fn load_data(&mut self) {
         if self.env.get("option_map").is_none() {
@@ -566,6 +584,20 @@ impl Elaborator {
             .unwrap_or_default();
         if mentions("ring") {
             self.load_ring();
+        }
+        if [
+            "dvd", "is_even", "is_odd", "gauss", "sum_to", "sum_sq", "fib", "is_prime", "pow_add",
+        ]
+        .iter()
+        .any(|n| mentions(n))
+        {
+            self.load_math();
+        }
+        if ["Array", "Map", "nat_pow", "nat_min", "nat_max", "nat_gcd"]
+            .iter()
+            .any(|n| mentions(n))
+        {
+            self.load_std();
         }
         if ["Option", "Subtype", "Sigma"].iter().any(|n| mentions(n)) {
             self.load_data();
