@@ -246,6 +246,10 @@ pub enum ExprKind {
     Wild,
     Unit,
     Neg(Box<Expr>),
+    /// `(e : T)`: elaborate `e` against the type `T`.
+    Ascribe(Box<Expr>, Box<Expr>),
+    /// `by { tactics }` as a term: a proof of the expected type.
+    By(Vec<Tactic>),
     /// `*e`: dereference (a no-op for value-semantic references).
     Deref(Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),

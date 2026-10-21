@@ -559,17 +559,7 @@ impl<'a> TypeChecker<'a> {
                     let f2 = self.whnf_core(&f)?;
                     match &*f2 {
                         Term::Lam(..) => {
-                            let mut body = f2.clone();
-                            let mut i = 0;
-                            while i < args.len() {
-                                let next = match &*body {
-                                    Term::Lam(_, _, b) => instantiate(b, &args[i]),
-                                    _ => break,
-                                };
-                                body = next;
-                                i += 1;
-                            }
-                            cur = mk_apps(&body, &args[i..]);
+                            cur = beta_apps(&f2, &args);
                         }
                         Term::Const(..) => {
                             let r = match self.reduce_nat_op(&f2, &args)? {

@@ -382,6 +382,8 @@ pub struct Elaborator {
     /// set once the prelude is loaded: later definitions may shadow prelude names
     prelude_loaded: bool,
     user_defs: std::collections::HashSet<String>,
+    /// The proof cache of the library being loaded, if any.
+    lib_cache: Option<crate::libcache::LibCache>,
 }
 
 impl Default for Elaborator {
@@ -452,6 +454,7 @@ impl Elaborator {
             inst_counter: 0,
             prelude_loaded: false,
             user_defs: Default::default(),
+            lib_cache: None,
         };
         let src = include_str!("prelude.apex");
         let module = apex_syntax::parse(src).expect("prelude must parse");
@@ -466,65 +469,59 @@ impl Elaborator {
         el
     }
 
+    /// Elaborate a bundled library (names count as prelude names: a program may define its
+    /// own and shadow them). Its theorem proofs come from the proof cache when it has them.
+    fn load_lib(&mut self, id: &str, src: &'static str) {
+        let module = apex_syntax::parse(src)
+            .unwrap_or_else(|e| panic!("{id} prelude must parse: {}", e.msg));
+        self.lib_cache = Some(crate::libcache::LibCache::open(id, src));
+        self.prelude_loaded = false;
+        let result = self.elab_module(&module);
+        self.prelude_loaded = true;
+        if let Some(c) = self.lib_cache.take() {
+            if result.is_ok() {
+                c.save();
+            }
+        }
+        result.unwrap_or_else(|e| {
+            let (line, _) = e.span.line_col(src);
+            panic!(
+                "{id} prelude must elaborate: {} (prelude_{id}.apex line {line})",
+                e.msg
+            )
+        });
+    }
+
     /// Load the verified arithmetic library behind `omega` (order on `Nat`, the
     /// reflected linear-expression language, and the certificate checker). It costs
     /// startup time, so it is loaded only for programs that use it.
     pub fn load_omega(&mut self) {
-        if self.env.get("omega_sound").is_some() {
-            return;
+        if self.env.get("omega_sound").is_none() {
+            self.load_lib("omega", include_str!("prelude_omega.apex"));
         }
-        let src = include_str!("prelude_omega.apex");
-        let module = apex_syntax::parse(src).expect("omega prelude must parse");
-        // library names count as prelude names: a program may define its own and shadow them
-        self.prelude_loaded = false;
-        let result = self.elab_module(&module);
-        self.prelude_loaded = true;
-        result.unwrap_or_else(|e| {
-            let (line, _) = e.span.line_col(src);
-            panic!(
-                "omega prelude must elaborate: {} (prelude_omega.apex line {line})",
-                e.msg
-            )
-        });
     }
 
     /// Load the verified `ring` normalizer (and the arithmetic library it uses).
     pub fn load_ring(&mut self) {
-        if self.env.get("ring_sound").is_some() {
-            return;
+        if self.env.get("ring_sound").is_none() {
+            self.load_omega();
+            self.load_lib("ring", include_str!("prelude_ring.apex"));
         }
-        self.load_omega();
-        let src = include_str!("prelude_ring.apex");
-        let module = apex_syntax::parse(src).expect("ring prelude must parse");
-        self.prelude_loaded = false;
-        let result = self.elab_module(&module);
-        self.prelude_loaded = true;
-        result.unwrap_or_else(|e| {
-            let (line, _) = e.span.line_col(src);
-            panic!(
-                "ring prelude must elaborate: {} (prelude_ring.apex line {line})",
-                e.msg
-            )
-        });
+    }
+
+    /// Load the integers (`Int`) with their verified laws; they use `omega` and `ring`.
+    pub fn load_int(&mut self) {
+        if self.env.get("int_add_comm").is_none() {
+            self.load_ring();
+            self.load_lib("int", include_str!("prelude_int.apex"));
+        }
     }
 
     /// Load classical logic (`em`, `by_contradiction`); `by_cases` and `by_contra` need it.
     pub fn load_classical(&mut self) {
-        if self.env.get("em").is_some() {
-            return;
+        if self.env.get("em").is_none() {
+            self.load_lib("classical", include_str!("prelude_classical.apex"));
         }
-        let src = include_str!("prelude_classical.apex");
-        let module = apex_syntax::parse(src).expect("classical prelude must parse");
-        self.prelude_loaded = false;
-        let result = self.elab_module(&module);
-        self.prelude_loaded = true;
-        result.unwrap_or_else(|e| {
-            let (line, _) = e.span.line_col(src);
-            panic!(
-                "classical prelude must elaborate: {} (prelude_classical.apex line {line})",
-                e.msg
-            )
-        });
     }
 
     /// Load the libraries a program refers to. They are loaded on demand because they
@@ -559,6 +556,9 @@ impl Elaborator {
         if mentions("ring") {
             self.load_ring();
         }
+        if mentions("Int") || mentions("int_add_comm") {
+            self.load_int();
+        }
         if mentions("em")
             || mentions("by_contradiction")
             || mentions("not_not")
@@ -582,22 +582,9 @@ impl Elaborator {
     }
 
     fn load_core(&mut self) {
-        if self.env.get("list_append_nil").is_some() {
-            return;
+        if self.env.get("list_append_nil").is_none() {
+            self.load_lib("core", include_str!("prelude_core.apex"));
         }
-        let src = include_str!("prelude_core.apex");
-        let module = apex_syntax::parse(src).expect("core prelude must parse");
-        // library names count as prelude names: a program may define its own and shadow them
-        self.prelude_loaded = false;
-        let result = self.elab_module(&module);
-        self.prelude_loaded = true;
-        result.unwrap_or_else(|e| {
-            let (line, _) = e.span.line_col(src);
-            panic!(
-                "core prelude must elaborate: {} (prelude_core.apex line {line})",
-                e.msg
-            )
-        });
     }
 
     pub fn env(&self) -> &Env {
@@ -610,8 +597,16 @@ impl Elaborator {
         self.tables.notations.prefix.extend(n.prefix.clone());
         self.tables.notations.macros.extend(n.macros.clone());
         self.tables.notations.tactics.extend(n.tactics.clone());
+        let timing = std::env::var_os("APEX_TIME").is_some();
         for item in &m.items {
+            let t0 = std::time::Instant::now();
             self.elab_item(item)?;
+            if timing {
+                let ms = t0.elapsed().as_millis();
+                if ms >= 20 {
+                    eprintln!("[time] {ms} ms: item at byte {}", item.span.start);
+                }
+            }
         }
         Ok(())
     }
@@ -721,6 +716,18 @@ impl Elaborator {
 
     /// Add a definition and return the kernel name it was stored under.
     fn add_def_named(&mut self, name: &Ident, ty: T, val: T, mask: Vec<Bk>) -> R<String> {
+        self.add_def_named_opts(name, ty, val, mask, false)
+    }
+
+    /// `trusted`: the value comes from the proof cache and is not checked again.
+    fn add_def_named_opts(
+        &mut self,
+        name: &Ident,
+        ty: T,
+        val: T,
+        mask: Vec<Bk>,
+        trusted: bool,
+    ) -> R<String> {
         // a user definition may shadow a prelude one; it then lives under another kernel name
         let mut kname = name.name.clone();
         if self.prelude_loaded {
@@ -733,7 +740,11 @@ impl Elaborator {
             }
             self.user_defs.insert(name.name.clone());
         }
-        from_kernel(self.env.add_def(&kname, &[], ty, val), name.span)?;
+        if trusted {
+            from_kernel(self.env.add_def_trusted(&kname, &[], ty, val), name.span)?;
+        } else {
+            from_kernel(self.env.add_def(&kname, &[], ty, val), name.span)?;
+        }
         self.masks.insert(kname.clone(), mask);
         Ok(kname)
     }
@@ -932,26 +943,37 @@ impl Elaborator {
     }
 
     fn elab_theorem_inner(&mut self, t: &TheoremDecl, span: Span) -> R<()> {
+        let qname = self.qualified(&t.name);
+        // a bundled library's proof, checked when the cache was written
+        let cached = self.lib_cache.as_ref().and_then(|c| c.get(&qname.name));
         let (ty, val, mask) = {
             let mut cx = self.cx();
             let (fvs, mask) = cx.elab_binders(&t.generics, &t.params)?;
             let stmt = cx.elab_type(&t.stmt)?;
-            let proof = match &t.proof {
-                Proof::Term(e) => cx.elab_check(e, &stmt)?,
-                Proof::Tactic(toks) => {
-                    let tacs = apex_syntax::parse_tactics(toks, span, &self.tables.notations)
-                        .map_err(|e| ElabError::new(e.span, e.msg))?;
-                    cx.prove(&stmt, &tacs, span)?
+            let val = match &cached {
+                Some(v) => v.clone(),
+                None => {
+                    let proof = match &t.proof {
+                        Proof::Term(e) => cx.elab_check(e, &stmt)?,
+                        Proof::Tactic(toks) => {
+                            let tacs =
+                                apex_syntax::parse_tactics(toks, span, &self.tables.notations)
+                                    .map_err(|e| ElabError::new(e.span, e.msg))?;
+                            cx.prove(&stmt, &tacs, span)?
+                        }
+                    };
+                    cx.close(&fvs, &proof, false, span)?
                 }
             };
-            (
-                cx.close(&fvs, &stmt, true, span)?,
-                cx.close(&fvs, &proof, false, span)?,
-                mask,
-            )
+            (cx.close(&fvs, &stmt, true, span)?, val, mask)
         };
-        let qname = self.qualified(&t.name);
-        let kernel_name = self.add_def_named(&qname, ty, val, mask)?;
+        let kernel_name =
+            self.add_def_named_opts(&qname, ty, val.clone(), mask, cached.is_some())?;
+        if cached.is_none() {
+            if let Some(c) = self.lib_cache.as_mut() {
+                c.record(&kernel_name, &val);
+            }
+        }
         if t.simp {
             self.tables.simp.push(kernel_name);
         }
@@ -1584,6 +1606,14 @@ struct Row<'e> {
     body: &'e Expr,
 }
 
+/// A `by { .. }` term: the proof is built once its type has no unknowns left.
+struct PendingBy {
+    mv: T,
+    tactics: Vec<Tactic>,
+    scope: Vec<(String, T)>,
+    span: Span,
+}
+
 /// State for elaborating a structurally recursive function.
 struct RecCtx {
     name: String,
@@ -1652,6 +1682,8 @@ struct Cx<'a> {
     tables: &'a Tables,
     /// Instance arguments waiting for their types to become known.
     goals: Vec<(T, Span)>,
+    /// `by { .. }` terms waiting for their expected type to be known.
+    pending_by: Vec<PendingBy>,
     /// Instance variables in scope (from `T: Trait` bounds).
     local_insts: Vec<T>,
     scope: Vec<(String, T)>,
@@ -1702,6 +1734,7 @@ impl<'a> Cx<'a> {
             aliases,
             tables,
             goals: Vec::new(),
+            pending_by: Vec::new(),
             local_insts: Vec::new(),
             scope: Vec::new(),
             rec: None,
@@ -1938,6 +1971,8 @@ impl<'a> Cx<'a> {
         let ty = from_kernel(self.tc.infer(&t), span)?;
         if from_kernel(self.tc.is_def_eq(&ty, expected), span)? {
             Ok(t)
+        } else if let Some(c) = self.try_coe(&t, &ty, expected, span)? {
+            Ok(c)
         } else {
             err(
                 span,
@@ -1948,6 +1983,23 @@ impl<'a> Cx<'a> {
                 ),
             )
         }
+    }
+
+    /// `Coe.coe t` when the program declares `impl Coe<B> for A` for the two types.
+    fn try_coe(&mut self, t: &T, ty: &T, expected: &T, span: Span) -> R<Option<T>> {
+        if !self.tables.traits.contains_key("Coe") {
+            return Ok(None);
+        }
+        let (a, b) = (self.tc.zonk(ty), self.tc.zonk(expected));
+        if first_mvar(&a).is_some() || first_mvar(&b).is_some() {
+            return Ok(None);
+        }
+        let class_app = mk_apps(&cnst("Coe".into(), vec![]), &[a.clone(), b.clone()]);
+        let Some(inst) = self.synth(&class_app, 0, span)? else {
+            return Ok(None);
+        };
+        let f = cnst("Coe.coe".into(), vec![]);
+        Ok(Some(mk_apps(&f, &[a, b, inst, t.clone()])))
     }
 
     fn nat_literal(&self, n: u64, _span: Span) -> R<T> {
@@ -2055,6 +2107,28 @@ impl<'a> Cx<'a> {
             ExprKind::Block(b) => self.elab_block_opts(b, exp, true),
             // references are values: `*r` is `r`
             ExprKind::Deref(inner) => self.elab(inner, exp),
+            ExprKind::By(tactics) => {
+                let Some(ty) = exp else {
+                    return err(
+                        e.span,
+                        "a `by` block needs a known expected type; use `have` or add an annotation",
+                    );
+                };
+                let mv = self.new_mvar(ty.clone(), e.span);
+                self.pending_by.push(PendingBy {
+                    mv: mv.clone(),
+                    tactics: tactics.clone(),
+                    scope: self.scope.clone(),
+                    span: e.span,
+                });
+                Ok(mv)
+            }
+            ExprKind::Ascribe(inner, ty) => {
+                let ty = self.elab_type(ty)?;
+                self.solve_goals(false)?;
+                let ty = self.tc.zonk(&ty);
+                self.elab_check(inner, &ty)
+            }
             ExprKind::Do(b) => self.elab_do(b, exp, e.span),
             ExprKind::For { var, iter, body } => self.elab_for(var, iter, body, e.span),
             ExprKind::Lambda { params, body } => self.elab_lambda(params, body, exp, e.span),
@@ -2080,7 +2154,20 @@ impl<'a> Cx<'a> {
             // references are not tracked yet: `&x` elaborates as `x` (the borrow checker is M5)
             ExprKind::Ref { inner, .. } => self.elab(inner, exp),
             ExprKind::Match(scrut, arms) => self.elab_match(scrut, arms, exp, e.span),
-            ExprKind::Neg(_) => err(e.span, "negation is not supported yet"),
+            ExprKind::Neg(inner) => {
+                // `-x` is `Neg.neg(x)`
+                let call = Expr {
+                    kind: ExprKind::Call(
+                        Box::new(Expr {
+                            kind: ExprKind::Var("Neg.neg".into()),
+                            span: e.span,
+                        }),
+                        vec![(**inner).clone()],
+                    ),
+                    span: e.span,
+                };
+                self.elab(&call, exp)
+            }
             ExprKind::Str(text) => Ok(str_lit(text)),
         }
     }
@@ -2532,6 +2619,51 @@ impl<'a> Cx<'a> {
     /// Resolve pending instance arguments. A goal whose type still has
     /// metavariables is postponed unless `force` is set.
     fn solve_goals(&mut self, force: bool) -> R<()> {
+        self.solve_goals_core(force)?;
+        self.run_pending_by(force)
+    }
+
+    /// Run the `by` blocks whose goals are fully known (all of them when `force`).
+    fn run_pending_by(&mut self, force: bool) -> R<()> {
+        loop {
+            let pending = std::mem::take(&mut self.pending_by);
+            if pending.is_empty() {
+                return Ok(());
+            }
+            let mut rest = Vec::new();
+            let mut progress = false;
+            for p in pending {
+                let ty = from_kernel(self.tc.infer(&p.mv), p.span)?;
+                let ty = self.tc.zonk(&ty);
+                if first_mvar(&ty).is_some() || has_level_mvar(&ty) {
+                    rest.push(p);
+                    continue;
+                }
+                let saved = std::mem::replace(&mut self.scope, p.scope.clone());
+                let pf = self.prove(&ty, &p.tactics, p.span);
+                self.scope = saved;
+                let pf = pf?;
+                from_kernel(self.tc.is_def_eq(&p.mv, &pf), p.span)?;
+                progress = true;
+            }
+            let done = rest.is_empty();
+            self.pending_by = rest;
+            if done {
+                return Ok(());
+            }
+            if !progress {
+                if force {
+                    return err(
+                        self.pending_by[0].span,
+                        "cannot tell what this `by` block should prove; add a type annotation",
+                    );
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    fn solve_goals_core(&mut self, force: bool) -> R<()> {
         loop {
             let goals = std::mem::take(&mut self.goals);
             if goals.is_empty() {
@@ -4212,6 +4344,8 @@ fn mentions_expr(e: &Expr, name: &str) -> bool {
         ExprKind::Var(n) => n == name,
         ExprKind::Nat(_) | ExprKind::Str(_) | ExprKind::Wild | ExprKind::Unit => false,
         ExprKind::Neg(a) | ExprKind::Deref(a) => mentions_expr(a, name),
+        ExprKind::Ascribe(a, t) => mentions_expr(a, name) || mentions_expr(t, name),
+        ExprKind::By(_) => false,
         ExprKind::Binary(_, a, b) | ExprKind::Arrow(a, b) => {
             mentions_expr(a, name) || mentions_expr(b, name)
         }

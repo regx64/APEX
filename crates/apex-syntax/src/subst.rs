@@ -14,6 +14,8 @@ pub fn subst_expr(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
             None => ExprKind::Var(n.clone()),
         },
         ExprKind::Neg(a) => ExprKind::Neg(bx(a)),
+        ExprKind::Ascribe(a, t) => ExprKind::Ascribe(bx(a), bx(t)),
+        ExprKind::By(ts) => ExprKind::By(ts.clone()),
         ExprKind::Deref(a) => ExprKind::Deref(bx(a)),
         ExprKind::Binary(op, a, b) => ExprKind::Binary(*op, bx(a), bx(b)),
         ExprKind::Ref {

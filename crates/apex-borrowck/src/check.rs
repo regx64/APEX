@@ -513,8 +513,8 @@ impl<'r> Checker<'r> {
                     }
                 }
             },
-            ExprKind::Neg(a) => self.expr(a, true),
-            ExprKind::Arrow(..) | ExprKind::Forall(..) => Out::default(),
+            ExprKind::Neg(a) | ExprKind::Ascribe(a, _) => self.expr(a, true),
+            ExprKind::Arrow(..) | ExprKind::Forall(..) | ExprKind::By(_) => Out::default(),
             ExprKind::Binary(_, l, r) => {
                 let callee = (self.resolver)(e.span);
                 self.call(callee.as_ref(), None, &[&**l, &**r])
@@ -1010,9 +1010,10 @@ mod tests {
                     walk(b, table, out);
                 }
                 ExprKind::Lambda { body, .. } => walk(body, table, out),
-                ExprKind::Ref { inner, .. } | ExprKind::Deref(inner) | ExprKind::Neg(inner) => {
-                    walk(inner, table, out)
-                }
+                ExprKind::Ref { inner, .. }
+                | ExprKind::Deref(inner)
+                | ExprKind::Neg(inner)
+                | ExprKind::Ascribe(inner, _) => walk(inner, table, out),
                 ExprKind::Field(b, _) => walk(b, table, out),
                 ExprKind::List(items) => items.iter().for_each(|a| walk(a, table, out)),
                 _ => {}

@@ -185,8 +185,35 @@ impl Env {
                     tc.pp(&ty)
                 ));
             }
-            tc.check_mults(&val)?;
+            // proofs are erased at runtime: only data has to respect its multiplicities
+            let is_proof = matches!(
+                tc.infer(&ty).and_then(|s| tc.whnf(&s)).as_deref(),
+                Ok(Term::Sort(l)) if l.is_zero()
+            );
+            if !is_proof {
+                tc.check_mults(&val)?;
+            }
         }
+        let height = self.next_height();
+        self.insert(
+            name.into(),
+            Decl::Def {
+                lparams: lps,
+                ty,
+                val,
+                height,
+            },
+        );
+        Ok(())
+    }
+
+    /// Add a definition without checking its value: for proofs that were checked before
+    /// (the library proof cache). The type is still checked; the caller vouches for `val`.
+    pub fn add_def_trusted(&mut self, name: &str, lparams: &[&str], ty: T, val: T) -> KResult<()> {
+        self.check_fresh(name)?;
+        let lps = to_names(lparams);
+        self.check_decl_levels(&lps, &[&ty, &val])?;
+        TypeChecker::new(self).check_is_type(&ty)?;
         let height = self.next_height();
         self.insert(
             name.into(),

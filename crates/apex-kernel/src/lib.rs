@@ -7,6 +7,7 @@ pub mod env;
 pub mod inductive;
 pub mod level;
 pub mod prelude;
+pub mod ser;
 pub mod tc;
 pub mod term;
 

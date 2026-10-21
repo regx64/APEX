@@ -142,3 +142,26 @@ M5 (소유권, 빌림 검사).
 `omega`는 `nat_lt`/`nat_beq`의 `= true/false` 사실을 `lt`/`=`/`≠`로 바꿔 쓴다. 커널은 `fix`를 계산하지 못하므로(접근성 증명이 불투명) 본문을 한 번 더
 재귀 호출을 일반 호출로 둔 채 엘라보레이션해서 풀이 등식 `f.eq : f params = 본문`을 `WellFounded.fix_eq`와 `congr_arg`로 증명한다.
 인터프리터는 `fix`를 일반 고정점으로 실행한다.
+
+
+## 상호 귀납형과 상호 재귀 (A-1b)
+
+`mutual { enum Tree<T> { Node(T, Forest<T>) } enum Forest<T> { Nil, Cons(Tree<T>, Forest<T>) } }`는 커널의 `MutualDecl` 하나로 들어간다
+(모티브는 타입마다 하나, 마이너는 가족 전체 생성자 순서, `IndInfo.family`가 가족을 기록). `match`/`cases`/`induction`은 현재 타입의 모티브만 실제로 쓰고
+다른 타입의 모티브는 상수 `PUnit`, 마이너는 `PUnit.unit`이다.
+
+`mutual { fn size_tree<T>(t: Tree<T>) -> Nat {..} fn size_forest<T>(f: Forest<T>) -> Nat {..} }`는 타입마다 함수 하나, 첫 매개변수로 감소하는 구조적 상호 재귀다.
+각 함수의 `match`에서 자기 타입의 마이너를 뽑아(`Cx::mutual_minors`) 모으고, 모든 함수를 공유 재귀자 `Tree.rec`(모티브: 타입별 `fun t => Π others, R`)로 정의한다.
+형제 호출 `size_forest(f)`는 그 필드의 귀납 가설이 된다. 한계: 타입당 함수 하나, 첫 매개변수만 감소, 중첩 귀납형(`List<Tree>` 필드)은 커널의 보조 타입 번역이 필요해 아직.
+
+## 라이브러리 증명 캐시
+
+번들 라이브러리(`prelude_omega/ring/int/classical/core`)는 정리가 많아 처음 로드할 때 수 초가 걸린다. 한 번 엘라보레이트하면 정리의 증명 항을
+`~/.cache/apex`(또는 `APEX_CACHE_DIR`)에 `apex-kernel::ser`의 DAG 형식으로 저장하고, 다음 실행은 **정리의 명제만** 엘라보레이트하고 증명은 캐시에서 가져온다
+(`Env::add_def_trusted`: 타입은 검사, 값은 검사하지 않음). 키는 라이브러리 소스와 실행 파일(크기·수정시각)의 해시다. 캐시는 신뢰 데이터라서
+`APEX_NO_CACHE=1`로 끌 수 있고, 독립 검증기(`apex verify`)는 처음부터 다시 검사한다.
+
+## 강제 변환, 타입 표기, `by` 항
+
+`impl Coe<B> for A`가 있으면 `A`가 필요한 곳에 `B`를 줄 수 있다 (`coerce`가 `Coe.coe`를 끼운다; 한 단계만). `Nat` 리터럴이 `Int`가 되는 것도 이것이다.
+`(e : T)`는 타입 표기, `-e`는 `Neg.neg(e)`. `by { .. }`는 항 자리에서도 쓸 수 있다: 기대 타입의 미지수가 풀린 뒤에 증명한다 (`PendingBy`).

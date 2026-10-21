@@ -19,7 +19,7 @@
 - [x] B-1b 잘 정초된 재귀: `fn f(..) termination_by m decreasing_by { .. } { .. }` (생략하면 매개변수를 측도로 추정, 감소 증명은 기본 `omega`), `if` 조건이 가설로 보인다, `f.eq` 풀이 등식 자동 생성. 커널에 `Acc`/`WellFounded.fix`/`fix_eq`. 사전순(lexicographic) 측도와 상호 재귀는 아직
 - [x] B-2 종속 패턴 매칭: 인덱스 족에 대한 `match`는 탭틱 엔진의 `cases`로 컴파일된다. 인덱스가 변수가 아니면 등식 `heq`로 일반화하고, `Nat` 인덱스 등식은 변수 제거(`Eq`의 `cases`로 커널이 의존 항을 옮긴다)나 `omega` 모순으로 푼다. 불가능한 생성자는 팔이 필요 없다(`vhead`). 재귀(`vmap`), 중첩 `match`(`vzip`) 지원. 한계: 인덱스 타입은 `Nat`만, 팔 안 패턴은 평평(중첩은 중첩 `match`로)
 - [x] B-3 `namespace`/`open`/`section`/`variable` (`fn`·`theorem`만 접두사; `struct`/`enum`/`trait`은 이름공간 안에서도 전역 이름. `universe`는 아직: 우주는 암시적). 섹션 변수는 언급한 선언에 선행 인자로 붙는다 (재귀 호출에서는 직접 넘겨야 함)
-- [~] B-4 `struct B extends A`(부모 필드 앞에 복사, 비제네릭이면 `toA()`), `#[derive(BEq, Show, Ord)]`(구조체·열거형, 제네릭 가능; 재귀 열거형은 아직). `class` 출력 매개변수·기본 인스턴스는 아직
+- [~] B-4 `struct B extends A`(부모 필드 앞에 복사, 비제네릭이면 `toA()`), `#[derive(BEq, Show, Ord)]`(구조체·열거형, 제네릭 가능, 재귀 열거형은 도우미 함수 `T_derived_beq`로). `class` 출력 매개변수·기본 인스턴스는 아직
 - [ ] B-5 강제 변환, 암시 람다, 서브타입/`Σ`/`∃` 표기
 
 ## C. 메타프로그래밍

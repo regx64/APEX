@@ -122,7 +122,7 @@ fn builtin_infix(op: &str) -> Option<(u8, bool, &'static str)> {
         "<->" => (2, true, "Iff"),
         "\\/" => (8, true, "Or"),
         "/\\" => (10, true, "And"),
-        "<=" => (12, false, "le"),
+        "<=" => (12, false, "LE.le"),
         ">=" => (12, false, "ge"),
         "!=" => (12, false, "ne"),
         _ => return None,
@@ -1568,6 +1568,10 @@ impl Parser {
                 self.bump();
                 ExprKind::Wild
             }
+            T::By => {
+                self.bump();
+                ExprKind::By(self.tactic_block()?)
+            }
             T::Ident(name)
                 if (name == "forall" || name == "exists")
                     && self
@@ -1633,6 +1637,14 @@ impl Parser {
                     ExprKind::Unit
                 } else {
                     let inner = self.expr()?;
+                    if self.eat(&T::Colon) {
+                        let ty = self.ty()?;
+                        let end = self.expect(&T::RParen)?;
+                        return Ok(Expr {
+                            kind: ExprKind::Ascribe(Box::new(inner), Box::new(ty)),
+                            span: start.to(end),
+                        });
+                    }
                     let end = self.expect(&T::RParen)?;
                     return Ok(Expr {
                         kind: inner.kind,

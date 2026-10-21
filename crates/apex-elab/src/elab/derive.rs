@@ -103,9 +103,25 @@ impl Elaborator {
             .iter()
             .map(|v| (v.name.name.clone(), v.fields.len()))
             .collect();
+        // fields of the enum's own type: the derived functions recurse on them
+        let recs: Vec<Vec<bool>> = e
+            .variants
+            .iter()
+            .map(|v| {
+                v.fields
+                    .iter()
+                    .map(|f| mentions_expr(f, &e.name.name))
+                    .collect()
+            })
+            .collect();
         for tr in &e.derives {
-            let text =
-                self.derive_text(tr, &e.name.name, &e.generics, Shape::Enum(&variants), span)?;
+            let text = self.derive_text(
+                tr,
+                &e.name.name,
+                &e.generics,
+                Shape::Enum(&variants, &recs),
+                span,
+            )?;
             self.elab_generated(&text, tr, &e.name.name, span)?;
         }
         Ok(())
@@ -234,6 +250,10 @@ impl Elaborator {
                 format!("{name}<{}>", args.join(", ")),
             )
         };
+        let recursive = matches!(&shape, Shape::Enum(_, recs) if recs.iter().flatten().any(|r| *r));
+        if recursive {
+            return self.derive_recursive(tr, name, &gs, &shape, &header, span);
+        }
         let _ = self_ty;
         let body = match (tr, &shape) {
             ("BEq", Shape::Struct(fields)) => {
@@ -246,7 +266,7 @@ impl Elaborator {
                     and_chain(&conds)
                 )
             }
-            ("BEq", Shape::Enum(vs)) => {
+            ("BEq", Shape::Enum(vs, _)) => {
                 let arms: Vec<String> = vs
                     .iter()
                     .map(|(v, n)| {
@@ -284,7 +304,7 @@ impl Elaborator {
                 }
                 format!("fn show(&self) -> String {{ {} }}", concat(parts))
             }
-            ("Show", Shape::Enum(vs)) => {
+            ("Show", Shape::Enum(vs, _)) => {
                 let arms: Vec<String> = vs
                     .iter()
                     .map(|(v, n)| {
@@ -321,7 +341,7 @@ impl Elaborator {
                 }
                 format!("fn lt(self, other: Self) -> Bool {{ {} }}", lex(fields))
             }
-            ("Ord", Shape::Enum(vs)) => {
+            ("Ord", Shape::Enum(vs, _)) => {
                 fn lex_vars(a: &[String], b: &[String]) -> String {
                     match (a, b) {
                         ([x], [y]) => format!("{x} < {y}"),
@@ -377,6 +397,164 @@ impl Elaborator {
     }
 }
 
+impl Elaborator {
+    /// BEq / Show / Ord of an enum with fields of its own type: the recursion lives in a
+    /// helper function (an `impl` method cannot call itself), which the `impl` delegates to.
+    fn derive_recursive(
+        &self,
+        tr: &str,
+        name: &str,
+        gs: &[&Generic],
+        shape: &Shape<'_>,
+        header: &str,
+        span: Span,
+    ) -> R<String> {
+        let Shape::Enum(vs, recs) = shape else {
+            unreachable!("only enums are recursive")
+        };
+        let helper = format!("{name}_derived_{}", tr.to_lowercase());
+        let gen_args: Vec<String> = gs.iter().map(|g| g.name.name.clone()).collect();
+        let gen_decl: Vec<String> = gen_args.iter().map(|g| format!("{g}: {tr}")).collect();
+        let (ty, gdecl) = if gs.is_empty() {
+            (name.to_string(), String::new())
+        } else {
+            (
+                format!("{name}<{}>", gen_args.join(", ")),
+                format!("<{}>", gen_decl.join(", ")),
+            )
+        };
+        match tr {
+            "BEq" => {
+                let arms: Vec<String> = vs
+                    .iter()
+                    .zip(recs.iter())
+                    .map(|((v, n), rs)| {
+                        let (a, b) = (names("a", *n), names("b", *n));
+                        let conds: Vec<String> = (0..*n)
+                            .map(|i| {
+                                if rs[i] {
+                                    format!("{helper}({}, {})", a[i], b[i])
+                                } else {
+                                    format!("{} == {}", a[i], b[i])
+                                }
+                            })
+                            .collect();
+                        format!(
+                            "{name}.{v}{pa} => match y {{ {name}.{v}{pb} => {}, _ => false }}",
+                            and_chain(&conds),
+                            pa = pat_args(&a),
+                            pb = pat_args(&b)
+                        )
+                    })
+                    .collect();
+                Ok(format!(
+                    "fn {helper}{gdecl}(x: {ty}, y: {ty}) -> Bool {{ match x {{ {} }} }}\n\
+                     {header} {{ fn beq(self, other: Self) -> Bool {{ {helper}(self, other) }} }}",
+                    arms.join(", ")
+                ))
+            }
+            "Show" => {
+                let arms: Vec<String> = vs
+                    .iter()
+                    .zip(recs.iter())
+                    .map(|((v, n), rs)| {
+                        let a = names("a", *n);
+                        let mut parts =
+                            vec![Part::Lit(if *n == 0 { v.clone() } else { format!("{v}(") })];
+                        for (i, x) in a.iter().enumerate() {
+                            if i > 0 {
+                                parts.push(Part::Lit(", ".into()));
+                            }
+                            parts.push(Part::Code(if rs[i] {
+                                format!("{helper}({x})")
+                            } else {
+                                format!("{x}.show()")
+                            }));
+                        }
+                        if *n > 0 {
+                            parts.push(Part::Lit(")".into()));
+                        }
+                        format!("{name}.{v}{} => {}", pat_args(&a), concat(parts))
+                    })
+                    .collect();
+                Ok(format!(
+                    "fn {helper}{gdecl}(x: {ty}) -> String {{ match x {{ {} }} }}\n\
+                     {header} {{ fn show(&self) -> String {{ {helper}(self) }} }}",
+                    arms.join(", ")
+                ))
+            }
+            "Ord" => {
+                // a three-way comparison (0 less, 1 equal, 2 greater) returned by the helper:
+                // recursion only ever goes forward on the first argument
+                let cmp_of = |x: &str, y: &str, rec: bool| {
+                    if rec {
+                        format!("{helper}({x}, {y})")
+                    } else {
+                        format!("if {x} < {y} {{ 0 }} else {{ if {y} < {x} {{ 2 }} else {{ 1 }} }}")
+                    }
+                };
+                fn lex(
+                    a: &[String],
+                    b: &[String],
+                    rs: &[bool],
+                    cmp_of: &dyn Fn(&str, &str, bool) -> String,
+                ) -> String {
+                    match (a, b, rs) {
+                        ([x], [y], [r]) => cmp_of(x, y, *r),
+                        ([x, ra @ ..], [y, rb @ ..], [r, rr @ ..]) => {
+                            let c = cmp_of(x, y, *r);
+                            format!(
+                                "if ({c}) == 1 {{ {} }} else {{ {c} }}",
+                                lex(ra, rb, rr, cmp_of)
+                            )
+                        }
+                        _ => "1".into(),
+                    }
+                }
+                let arms: Vec<String> = vs
+                    .iter()
+                    .zip(recs.iter())
+                    .enumerate()
+                    .map(|(i, ((v, n), rs))| {
+                        let (a, b) = (names("a", *n), names("b", *n));
+                        let inner: Vec<String> = vs
+                            .iter()
+                            .enumerate()
+                            .map(|(j, (w, m))| {
+                                let pb = pat_args(&names("b", *m));
+                                let result = if j < i {
+                                    "2".to_string()
+                                } else if j > i {
+                                    "0".to_string()
+                                } else if *n == 0 {
+                                    "1".to_string()
+                                } else {
+                                    lex(&a, &b, rs, &cmp_of)
+                                };
+                                format!("{name}.{w}{pb} => {result}")
+                            })
+                            .collect();
+                        format!(
+                            "{name}.{v}{} => match y {{ {} }}",
+                            pat_args(&a),
+                            inner.join(", ")
+                        )
+                    })
+                    .collect();
+                Ok(format!(
+                    "fn {helper}{gdecl}(x: {ty}, y: {ty}) -> Nat {{ match x {{ {} }} }}\n\
+                     {header} {{ fn lt(self, other: Self) -> Bool {{ {helper}(self, other) == 0 }} }}",
+                    arms.join(", ")
+                ))
+            }
+            _ => err(
+                span,
+                format!("cannot derive `{tr}` (supported: BEq, Show, Ord)"),
+            ),
+        }
+    }
+}
+
 fn pat_args(names: &[String]) -> String {
     if names.is_empty() {
         String::new()
@@ -387,5 +565,5 @@ fn pat_args(names: &[String]) -> String {
 
 enum Shape<'a> {
     Struct(&'a [String]),
-    Enum(&'a [(String, usize)]),
+    Enum(&'a [(String, usize)], &'a [Vec<bool>]),
 }

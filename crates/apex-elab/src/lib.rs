@@ -5,6 +5,7 @@
 //! nothing here needs to be trusted.
 
 mod elab;
+mod libcache;
 
 pub use elab::{ElabError, Elaborator};
 

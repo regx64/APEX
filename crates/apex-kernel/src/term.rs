@@ -106,25 +106,163 @@ pub fn app_spine(t: &T) -> (T, Vec<T>) {
     (cur, args)
 }
 
+/// `App(f, a)` reusing `old` when neither child changed (saves the allocation).
+#[inline]
+fn app_like(old: &T, of: &T, oa: &T, f: T, a: T) -> T {
+    if Rc::ptr_eq(&f, of) && Rc::ptr_eq(&a, oa) {
+        old.clone()
+    } else {
+        app(f, a)
+    }
+}
+
+#[inline]
+fn bind_like(old: &T, ot: &T, ob: &T, t: T, b: T, mk: impl FnOnce(T, T) -> T) -> T {
+    if Rc::ptr_eq(&t, ot) && Rc::ptr_eq(&b, ob) {
+        old.clone()
+    } else {
+        mk(t, b)
+    }
+}
+
 /// Replace `BVar(0)` in `t` by `val`. If `val` has loose bound variables they
 /// are shifted as the substitution goes under binders.
 pub fn instantiate(t: &T, val: &T) -> T {
     inst_at(t, val, has_bvar(val), 0)
 }
 
+/// Substitute `vals` for the `vals.len()` innermost binders at once: `vals[0]` is the value
+/// of the outermost of them (`BVar(n-1)` in `body`), `vals[n-1]` that of `BVar(0)`.
+pub fn instantiate_many(body: &T, vals: &[T]) -> T {
+    match vals {
+        [] => body.clone(),
+        [v] => instantiate(body, v),
+        _ => {
+            let open = vals.iter().any(has_bvar);
+            inst_many_at(body, vals, open, 0)
+        }
+    }
+}
+
+fn inst_many_at(t: &T, vals: &[T], open: bool, d: u32) -> T {
+    let n = vals.len() as u32;
+    match &**t {
+        Term::BVar(i) => {
+            if *i < d {
+                t.clone()
+            } else if *i < d + n {
+                let v = &vals[(n - 1 - (*i - d)) as usize];
+                if open && d > 0 {
+                    lift(v, d, 0)
+                } else {
+                    v.clone()
+                }
+            } else {
+                bvar(i - n)
+            }
+        }
+        Term::FVar(_)
+        | Term::MVar(_)
+        | Term::Sort(_)
+        | Term::Const(..)
+        | Term::Lit(_)
+        | Term::Str(_) => t.clone(),
+        Term::App(f, a) => app_like(
+            t,
+            f,
+            a,
+            inst_many_at(f, vals, open, d),
+            inst_many_at(a, vals, open, d),
+        ),
+        Term::Lam(m, ty, b) => bind_like(
+            t,
+            ty,
+            b,
+            inst_many_at(ty, vals, open, d),
+            inst_many_at(b, vals, open, d + 1),
+            |x, y| lam(*m, x, y),
+        ),
+        Term::Pi(m, ty, b) => bind_like(
+            t,
+            ty,
+            b,
+            inst_many_at(ty, vals, open, d),
+            inst_many_at(b, vals, open, d + 1),
+            |x, y| pi(*m, x, y),
+        ),
+        Term::Let(m, ty, v, b) => {
+            let (nt, nv, nb) = (
+                inst_many_at(ty, vals, open, d),
+                inst_many_at(v, vals, open, d),
+                inst_many_at(b, vals, open, d + 1),
+            );
+            if Rc::ptr_eq(&nt, ty) && Rc::ptr_eq(&nv, v) && Rc::ptr_eq(&nb, b) {
+                t.clone()
+            } else {
+                let_(*m, nt, nv, nb)
+            }
+        }
+    }
+}
+
+/// Apply `f` to `args`, reducing the leading β-redexes in one substitution pass.
+pub fn beta_apps(f: &T, args: &[T]) -> T {
+    let mut body = f.clone();
+    let mut k = 0;
+    while k < args.len() {
+        match &*body.clone() {
+            Term::Lam(_, _, b) => {
+                body = b.clone();
+                k += 1;
+            }
+            _ => break,
+        }
+    }
+    if k == 0 {
+        return mk_apps(f, args);
+    }
+    let r = instantiate_many(&body, &args[..k]);
+    // the result may itself be a lambda applied to the remaining arguments
+    if k < args.len() {
+        head_beta(&mk_apps(&r, &args[k..]))
+    } else {
+        r
+    }
+}
+
 /// Shift loose bound variables (index >= `cutoff`) up by `n`.
 pub fn lift(t: &T, n: u32, cutoff: u32) -> T {
     match &**t {
         Term::BVar(i) if *i >= cutoff => bvar(i + n),
-        Term::App(f, a) => app(lift(f, n, cutoff), lift(a, n, cutoff)),
-        Term::Lam(m, ty, b) => lam(*m, lift(ty, n, cutoff), lift(b, n, cutoff + 1)),
-        Term::Pi(m, ty, b) => pi(*m, lift(ty, n, cutoff), lift(b, n, cutoff + 1)),
-        Term::Let(m, ty, v, b) => let_(
-            *m,
+        Term::App(f, a) => app_like(t, f, a, lift(f, n, cutoff), lift(a, n, cutoff)),
+        Term::Lam(m, ty, b) => bind_like(
+            t,
+            ty,
+            b,
             lift(ty, n, cutoff),
-            lift(v, n, cutoff),
             lift(b, n, cutoff + 1),
+            |x, y| lam(*m, x, y),
         ),
+        Term::Pi(m, ty, b) => bind_like(
+            t,
+            ty,
+            b,
+            lift(ty, n, cutoff),
+            lift(b, n, cutoff + 1),
+            |x, y| pi(*m, x, y),
+        ),
+        Term::Let(m, ty, v, b) => {
+            let (nt, nv, nb) = (
+                lift(ty, n, cutoff),
+                lift(v, n, cutoff),
+                lift(b, n, cutoff + 1),
+            );
+            if Rc::ptr_eq(&nt, ty) && Rc::ptr_eq(&nv, v) && Rc::ptr_eq(&nb, b) {
+                t.clone()
+            } else {
+                let_(*m, nt, nv, nb)
+            }
+        }
         _ => t.clone(),
     }
 }
@@ -150,15 +288,35 @@ fn inst_at(t: &T, val: &T, open: bool, d: u32) -> T {
         | Term::Const(..)
         | Term::Lit(_)
         | Term::Str(_) => t.clone(),
-        Term::App(f, a) => app(inst_at(f, val, open, d), inst_at(a, val, open, d)),
-        Term::Lam(m, ty, b) => lam(*m, inst_at(ty, val, open, d), inst_at(b, val, open, d + 1)),
-        Term::Pi(m, ty, b) => pi(*m, inst_at(ty, val, open, d), inst_at(b, val, open, d + 1)),
-        Term::Let(m, ty, v, b) => let_(
-            *m,
+        Term::App(f, a) => app_like(t, f, a, inst_at(f, val, open, d), inst_at(a, val, open, d)),
+        Term::Lam(m, ty, b) => bind_like(
+            t,
+            ty,
+            b,
             inst_at(ty, val, open, d),
-            inst_at(v, val, open, d),
             inst_at(b, val, open, d + 1),
+            |x, y| lam(*m, x, y),
         ),
+        Term::Pi(m, ty, b) => bind_like(
+            t,
+            ty,
+            b,
+            inst_at(ty, val, open, d),
+            inst_at(b, val, open, d + 1),
+            |x, y| pi(*m, x, y),
+        ),
+        Term::Let(m, ty, v, b) => {
+            let (nt, nv, nb) = (
+                inst_at(ty, val, open, d),
+                inst_at(v, val, open, d),
+                inst_at(b, val, open, d + 1),
+            );
+            if Rc::ptr_eq(&nt, ty) && Rc::ptr_eq(&nv, v) && Rc::ptr_eq(&nb, b) {
+                t.clone()
+            } else {
+                let_(*m, nt, nv, nb)
+            }
+        }
     }
 }
 
@@ -183,15 +341,35 @@ fn abs_at(t: &T, fvars: &[u32], d: u32) -> T {
         | Term::Const(..)
         | Term::Lit(_)
         | Term::Str(_) => t.clone(),
-        Term::App(f, a) => app(abs_at(f, fvars, d), abs_at(a, fvars, d)),
-        Term::Lam(m, ty, b) => lam(*m, abs_at(ty, fvars, d), abs_at(b, fvars, d + 1)),
-        Term::Pi(m, ty, b) => pi(*m, abs_at(ty, fvars, d), abs_at(b, fvars, d + 1)),
-        Term::Let(m, ty, v, b) => let_(
-            *m,
+        Term::App(f, a) => app_like(t, f, a, abs_at(f, fvars, d), abs_at(a, fvars, d)),
+        Term::Lam(m, ty, b) => bind_like(
+            t,
+            ty,
+            b,
             abs_at(ty, fvars, d),
-            abs_at(v, fvars, d),
             abs_at(b, fvars, d + 1),
+            |x, y| lam(*m, x, y),
         ),
+        Term::Pi(m, ty, b) => bind_like(
+            t,
+            ty,
+            b,
+            abs_at(ty, fvars, d),
+            abs_at(b, fvars, d + 1),
+            |x, y| pi(*m, x, y),
+        ),
+        Term::Let(m, ty, v, b) => {
+            let (nt, nv, nb) = (
+                abs_at(ty, fvars, d),
+                abs_at(v, fvars, d),
+                abs_at(b, fvars, d + 1),
+            );
+            if Rc::ptr_eq(&nt, ty) && Rc::ptr_eq(&nv, v) && Rc::ptr_eq(&nb, b) {
+                t.clone()
+            } else {
+                let_(*m, nt, nv, nb)
+            }
+        }
     }
 }
 
@@ -308,17 +486,11 @@ pub fn collect_level_params(t: &T, out: &mut Vec<Name>) {
 
 /// Beta-reduce while the head is a λ applied to arguments.
 pub fn head_beta(t: &T) -> T {
-    let (mut f, args) = app_spine(t);
-    let mut i = 0;
-    while i < args.len() {
-        let next = match &*f {
-            Term::Lam(_, _, b) => instantiate(b, &args[i]),
-            _ => break,
-        };
-        f = next;
-        i += 1;
+    let (f, args) = app_spine(t);
+    if args.is_empty() || !matches!(&*f, Term::Lam(..)) {
+        return t.clone();
     }
-    mk_apps(&f, &args[i..])
+    beta_apps(&f, &args)
 }
 
 /// The first metavariable occurring in `t`, if any.

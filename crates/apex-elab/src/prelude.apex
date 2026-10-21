@@ -100,6 +100,9 @@ trait Rem { fn rem(self, other: Self) -> Self; }
 trait BEq { fn beq(self, other: Self) -> Bool; }
 trait Ord { fn lt(self, other: Self) -> Bool; }
 trait Show { fn show(&self) -> String; }
+trait Neg { fn neg(self) -> Self; }
+/// `Coe<B> for A`: a value of type `A` is accepted where a `B` is expected.
+trait Coe<B> { fn coe(self) -> B; }
 
 impl Add for Nat { fn add(self, other: Self) -> Self { Nat.add(self, other) } }
 impl Sub for Nat { fn sub(self, other: Self) -> Self { nat_sub(self, other) } }

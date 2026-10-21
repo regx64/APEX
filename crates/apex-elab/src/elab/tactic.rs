@@ -1710,9 +1710,13 @@ impl<'a> Cx<'a> {
                 continue;
             }
             // predicates such as `le` and `lt` stay folded: tactics recognize them by name
-            if let Ok(sort_of) = self.tc.infer(&s) {
-                if matches!(self.tc.whnf(&sort_of).as_deref(), Ok(Term::Sort(l)) if l.is_zero()) {
-                    continue;
+            // (unless the user asked for this very function: `simp [le]`, `unfold le`)
+            if only.is_none() {
+                if let Ok(sort_of) = self.tc.infer(&s) {
+                    if matches!(self.tc.whnf(&sort_of).as_deref(), Ok(Term::Sort(l)) if l.is_zero())
+                    {
+                        continue;
+                    }
                 }
             }
             if let Some(w) = self.eval_head(&s) {

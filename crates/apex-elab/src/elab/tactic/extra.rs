@@ -628,10 +628,10 @@ impl<'a> Cx<'a> {
             }
             ExprKind::Call(f, args)
                 if args.len() == 2
-                    && matches!(&f.kind, ExprKind::Var(n) if n == "le" || n == "lt") =>
+                    && matches!(&f.kind, ExprKind::Var(n) if n == "le" || n == "lt" || n == "LE.le") =>
             {
                 let rel = match &f.kind {
-                    ExprKind::Var(n) if n == "le" => Rel::Le,
+                    ExprKind::Var(n) if n == "le" || n == "LE.le" => Rel::Le,
                     _ => Rel::Lt,
                 };
                 let l = side(self, &args[0], prev)?;

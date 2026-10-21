@@ -25,7 +25,10 @@ theorem add_right_cancel(a: Nat, b: Nat, c: Nat, h: a + c = b + c): a = b := by 
 }
 fn le(a: Nat, b: Nat) -> Prop { Exists(|k: Nat| a + k = b) }
 fn lt(a: Nat, b: Nat) -> Prop { le(Nat.succ(a), b) }
-fn ge(a: Nat, b: Nat) -> Prop { le(b, a) }
+/// `a <= b` is `LE.le(a, b)`: overloaded, and for `Nat` the same as `le(a, b)`.
+trait LE { fn le(self, other: Self) -> Prop; }
+impl LE for Nat { fn le(self, other: Self) -> Prop { le(self, other) } }
+fn ge<A: LE>(a: A, b: A) -> Prop { LE.le(b, a) }
 fn gt(a: Nat, b: Nat) -> Prop { lt(b, a) }
 fn ne<A>(a: A, b: A) -> Prop { a = b -> False }
 fn Iff(p: Prop, q: Prop) -> Prop { And(p -> q, q -> p) }
