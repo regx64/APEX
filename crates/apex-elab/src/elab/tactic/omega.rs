@@ -48,11 +48,11 @@ fn c(name: &str) -> T {
 
 fn ex_term(e: &Ex) -> T {
     match e {
-        Ex::Atom(i) => app(c("LExpr.Atom"), lit(*i as u64)),
-        Ex::Const(n) => app(c("LExpr.Const"), lit(*n)),
+        Ex::Atom(i) => app(c("LExpr.Atom"), lit(*i as u128)),
+        Ex::Const(n) => app(c("LExpr.Const"), lit(*n as u128)),
         Ex::Add(a, b) => mk_apps(&c("LExpr.Add"), &[ex_term(a), ex_term(b)]),
-        Ex::Scale(k, x) => mk_apps(&c("LExpr.Scale"), &[lit(*k), ex_term(x)]),
-        Ex::ScaleR(x, k) => mk_apps(&c("LExpr.ScaleR"), &[ex_term(x), lit(*k)]),
+        Ex::Scale(k, x) => mk_apps(&c("LExpr.Scale"), &[lit(*k as u128), ex_term(x)]),
+        Ex::ScaleR(x, k) => mk_apps(&c("LExpr.ScaleR"), &[ex_term(x), lit(*k as u128)]),
     }
 }
 
@@ -209,7 +209,9 @@ impl<'a> Cx<'a> {
     fn reify(&mut self, t: &T, atoms: &mut Vec<T>) -> Ex {
         let t = self.tc.zonk(t);
         if let Term::Lit(n) = &*t {
-            return Ex::Const(*n);
+            if let Ok(small) = u64::try_from(*n) {
+                return Ex::Const(small);
+            }
         }
         let (h, args) = app_spine(&t);
         if let Term::Const(n, _) = &*h {
@@ -681,7 +683,7 @@ impl<'a> Cx<'a> {
                 )
             })
             .collect();
-        let ws_t: Vec<T> = used.iter().map(|(_, w)| lit(*w)).collect();
+        let ws_t: Vec<T> = used.iter().map(|(_, w)| lit(*w as u128)).collect();
         let cs_list = list_of(&cstr_ty, &cs);
         let ws_list = list_of(&nat_ty, &ws_t);
         let env_list = list_of(&nat_ty, &atoms);

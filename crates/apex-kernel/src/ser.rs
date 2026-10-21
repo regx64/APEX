@@ -20,7 +20,11 @@ pub struct Writer {
     keep: Vec<T>,
 }
 
-fn varint(out: &mut Vec<u8>, mut n: u64) {
+fn varint(out: &mut Vec<u8>, n: u64) {
+    varint128(out, n as u128)
+}
+
+fn varint128(out: &mut Vec<u8>, mut n: u128) {
     loop {
         let b = (n & 0x7f) as u8;
         n >>= 7;
@@ -164,7 +168,7 @@ impl Writer {
                         }
                         Term::Lit(n) => {
                             buf.push(5);
-                            varint(&mut buf, *n);
+                            varint128(&mut buf, *n);
                         }
                         Term::Str(s) => {
                             buf.push(6);
@@ -243,16 +247,20 @@ impl<'a> Reader<'a> {
     }
 
     fn varint(&mut self) -> Result<u64, DecodeError> {
-        let mut n = 0u64;
+        Ok(self.varint128()? as u64)
+    }
+
+    fn varint128(&mut self) -> Result<u128, DecodeError> {
+        let mut n = 0u128;
         let mut shift = 0;
         loop {
             let b = self.byte()?;
-            n |= ((b & 0x7f) as u64) << shift;
+            n |= ((b & 0x7f) as u128) << shift;
             if b & 0x80 == 0 {
                 return Ok(n);
             }
             shift += 7;
-            if shift > 63 {
+            if shift > 127 {
                 return Err(DecodeError("bad number".into()));
             }
         }
@@ -312,7 +320,7 @@ impl<'a> Reader<'a> {
                 }
                 Rc::new(Term::Const(n, ls))
             }
-            5 => Rc::new(Term::Lit(self.varint()?)),
+            5 => Rc::new(Term::Lit(self.varint128()?)),
             6 => Rc::new(Term::Str(self.name()?)),
             7 => {
                 let (a, b) = (self.varint()?, self.varint()?);

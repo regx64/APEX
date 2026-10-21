@@ -784,7 +784,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Compare literal `n` with `Nat.zero` or `Nat.succ x`; `None` if `other` is neither.
-    fn lit_vs(&mut self, n: u64, other: &T) -> KResult<Option<bool>> {
+    fn lit_vs(&mut self, n: u128, other: &T) -> KResult<Option<bool>> {
         let (h, args) = app_spine(other);
         match (&*h, args.len()) {
             (Term::Const(c, _), 0) if &**c == "Nat.zero" => Ok(Some(n == 0)),
@@ -943,7 +943,7 @@ impl<'a> TypeChecker<'a> {
     }
 }
 
-fn lit_to_ctor(n: u64) -> T {
+fn lit_to_ctor(n: u128) -> T {
     if n == 0 {
         cnst("Nat.zero".into(), vec![])
     } else {

@@ -43,7 +43,7 @@ impl<'a> Cx<'a> {
                 atoms.len() - 1
             }
         };
-        re("RE.RVar", vec![lit(idx as u64)])
+        re("RE.RVar", vec![lit(idx as u128)])
     }
 
     pub(super) fn t_ring(&mut self, st: &mut Tac, g: Goal, span: Span) -> R<Vec<Goal>> {

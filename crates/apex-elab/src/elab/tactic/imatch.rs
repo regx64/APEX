@@ -376,9 +376,9 @@ impl<'a> Cx<'a> {
                     return Ok(None);
                 }
                 Step::Eliminate(v, other, c) => {
-                    let mut expr = lit(c);
+                    let mut expr = lit(c as u128);
                     if let Some(o) = other {
-                        expr = mk_apps(&cnst("Nat.add".into(), vec![]), &[fvar(o), lit(c)]);
+                        expr = mk_apps(&cnst("Nat.add".into(), vec![]), &[fvar(o), lit(c as u128)]);
                     }
                     // hm : expr = v, by omega from the equation; then `cases hm` substitutes `v`
                     let hm_ty = mk_apps(

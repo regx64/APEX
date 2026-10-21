@@ -46,7 +46,7 @@ pub enum Term {
     Sort(Level),
     Const(Name, Vec<Level>),
     /// A natural number literal; definitionally `Nat.zero` / `Nat.succ (Lit (n-1))`.
-    Lit(u64),
+    Lit(u128),
     /// A string literal, of type `String`.
     Str(Name),
     App(T, T),
@@ -71,7 +71,7 @@ pub fn sort(l: Level) -> T {
 pub fn cnst(n: Name, ls: Vec<Level>) -> T {
     Rc::new(Term::Const(n, ls))
 }
-pub fn lit(n: u64) -> T {
+pub fn lit(n: u128) -> T {
     Rc::new(Term::Lit(n))
 }
 pub fn str_lit(s: &str) -> T {

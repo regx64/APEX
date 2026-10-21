@@ -5,7 +5,7 @@ use apex_span::Span;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TokenKind {
     Ident(String),
-    Nat(u64),
+    Nat(u128),
     Str(String),
     Lifetime(String),
     // keywords

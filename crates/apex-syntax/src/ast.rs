@@ -245,7 +245,7 @@ pub struct Expr {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExprKind {
     Var(String),
-    Nat(u64),
+    Nat(u128),
     Str(String),
     Wild,
     Unit,

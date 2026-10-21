@@ -2113,7 +2113,7 @@ impl<'a> Cx<'a> {
         }
     }
 
-    fn nat_literal(&self, n: u64, _span: Span) -> R<T> {
+    fn nat_literal(&self, n: u128, _span: Span) -> R<T> {
         Ok(lit(n))
     }
 

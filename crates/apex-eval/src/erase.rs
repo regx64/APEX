@@ -65,7 +65,7 @@ impl<'a> Eraser<'a> {
                 None => return Err("internal error: free variable outside its binder".into()),
             },
             Term::Const(n, _) => Ir::Global(n.clone()),
-            Term::Lit(n) => Ir::Nat(*n as u128),
+            Term::Lit(n) => Ir::Nat(*n),
             Term::Str(s) => Ir::Str(s.clone()),
             Term::App(f, a) => {
                 let tf = self.tc.infer(f).map_err(|e| e.0)?;

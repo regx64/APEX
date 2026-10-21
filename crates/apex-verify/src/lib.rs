@@ -36,7 +36,7 @@ enum Term {
     FVar(u32),
     Sort(Lvl),
     Const(Name, Vec<Lvl>),
-    Lit(u64),
+    Lit(u128),
     Str(Name),
     App(Tm, Tm),
     Lam(Tm, Tm),
@@ -324,15 +324,18 @@ impl<'a> Blob<'a> {
         Ok(b)
     }
     fn var(&mut self) -> Result<u64, String> {
-        let (mut n, mut shift) = (0u64, 0);
+        Ok(self.var128()? as u64)
+    }
+    fn var128(&mut self) -> Result<u128, String> {
+        let (mut n, mut shift) = (0u128, 0);
         loop {
             let b = self.byte()?;
-            n |= ((b & 0x7f) as u64) << shift;
+            n |= ((b & 0x7f) as u128) << shift;
             if b & 0x80 == 0 {
                 return Ok(n);
             }
             shift += 7;
-            if shift > 63 {
+            if shift > 127 {
                 return Err("bad number".into());
             }
         }
@@ -375,7 +378,7 @@ impl<'a> Blob<'a> {
                 }
                 Const(n, ls)
             }
-            5 => Lit(self.var()?),
+            5 => Lit(self.var128()?),
             6 => Str(self.name()?),
             7 => {
                 let (a, b) = (self.var()?, self.var()?);
@@ -635,7 +638,7 @@ impl<'a> Checker<'a> {
             return Ok(None);
         };
         let (x, y) = (*x, *y);
-        let lit = |v: u64| Rc::new(Lit(v));
+        let lit = |v: u128| Rc::new(Lit(v));
         let boolean = |v: bool| c(if v { "Bool.true" } else { "Bool.false" });
         Ok(Some(match &**n {
             "Nat.add" => match x.checked_add(y) {
@@ -655,7 +658,7 @@ impl<'a> Checker<'a> {
         }))
     }
 
-    fn lit_ctor(n: u64) -> Tm {
+    fn lit_ctor(n: u128) -> Tm {
         if n == 0 {
             c("Nat.zero")
         } else {
@@ -921,7 +924,7 @@ impl<'a> Checker<'a> {
         self.proof_irrelevant(&a, &b)
     }
 
-    fn lit_vs(&mut self, n: u64, other: &Tm) -> Res<Option<bool>> {
+    fn lit_vs(&mut self, n: u128, other: &Tm) -> Res<Option<bool>> {
         let (h, args) = spine(other);
         match (&*h, args.len()) {
             (Const(k, _), 0) if &**k == "Nat.zero" => Ok(Some(n == 0)),
