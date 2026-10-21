@@ -351,7 +351,7 @@ impl<'a> Cx<'a> {
 
     // ---- goal manipulation ----
 
-    fn add_hyp(&mut self, st: &mut Tac, g: &Goal, name: &str, ty: T, proof: T) -> Goal {
+    pub(super) fn add_hyp(&mut self, st: &mut Tac, g: &Goal, name: &str, ty: T, proof: T) -> Goal {
         let fv = self.tc.fresh(name, ty.clone(), Mult::Omega);
         let mut ng = self.new_goal(g, g.target.clone(), "");
         ng.scope.push((name.to_string(), fvar(fv)));

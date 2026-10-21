@@ -9,6 +9,7 @@
 
 use super::*;
 
+mod auto;
 mod omega;
 
 /// Options of `simp`.
@@ -32,6 +33,7 @@ struct Goal {
     tag: String,
 }
 
+#[derive(Clone)]
 enum Sol {
     Term(T),
     /// `fun fvs => body`, where `body` is another goal.
@@ -465,6 +467,7 @@ impl<'a> Cx<'a> {
                 Ok(vec![])
             }
             TacticKind::Omega => self.t_omega(st, g, span),
+            TacticKind::Auto => self.t_auto(st, g, span),
             TacticKind::Show(e) => {
                 let ty = self.elab_type(e)?;
                 self.solve_goals(false)?;

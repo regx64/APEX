@@ -472,7 +472,11 @@ impl Elaborator {
         }
         let src = include_str!("prelude_omega.apex");
         let module = apex_syntax::parse(src).expect("omega prelude must parse");
-        self.elab_module(&module).unwrap_or_else(|e| {
+        // library names count as prelude names: a program may define its own and shadow them
+        self.prelude_loaded = false;
+        let result = self.elab_module(&module);
+        self.prelude_loaded = true;
+        result.unwrap_or_else(|e| {
             let (line, _) = e.span.line_col(src);
             panic!(
                 "omega prelude must elaborate: {} (prelude_omega.apex line {line})",
@@ -529,7 +533,11 @@ impl Elaborator {
         }
         let src = include_str!("prelude_core.apex");
         let module = apex_syntax::parse(src).expect("core prelude must parse");
-        self.elab_module(&module).unwrap_or_else(|e| {
+        // library names count as prelude names: a program may define its own and shadow them
+        self.prelude_loaded = false;
+        let result = self.elab_module(&module);
+        self.prelude_loaded = true;
+        result.unwrap_or_else(|e| {
             let (line, _) = e.span.line_col(src);
             panic!(
                 "core prelude must elaborate: {} (prelude_core.apex line {line})",

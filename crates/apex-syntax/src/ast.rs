@@ -294,6 +294,8 @@ pub enum TacticKind {
     Symm,
     Decide,
     Omega,
+    /// `auto`: a small backtracking proof search.
+    Auto,
     Show(Expr),
     Have {
         name: Ident,
