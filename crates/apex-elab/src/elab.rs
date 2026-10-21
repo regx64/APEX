@@ -30,6 +30,7 @@ impl ElabError {
 }
 
 mod derive;
+mod mutual;
 mod tactic;
 mod wf;
 
@@ -595,6 +596,7 @@ impl Elaborator {
                 r
             }
             ItemKind::Import(_) | ItemKind::Notation(_) => Ok(()), // loaded by the driver / applied by the parser
+            ItemKind::Mutual(items) => self.elab_mutual(items, item.span),
             ItemKind::Open(name) => {
                 self.tables.opens.push(name.clone());
                 Ok(())
@@ -604,6 +606,37 @@ impl Elaborator {
                 Ok(())
             }
         }
+    }
+
+    /// `mutual { enum A .. enum B .. }`: mutually inductive types.
+    fn elab_mutual(&mut self, items: &[Item], span: Span) -> R<()> {
+        let mut enums = Vec::new();
+        let mut fns = Vec::new();
+        for it in items {
+            match &it.kind {
+                ItemKind::Enum(e) => enums.push(e),
+                ItemKind::Fn(f) => fns.push(f),
+                _ => {
+                    return err(
+                        it.span,
+                        "only `enum` or only `fn` declarations can be in a `mutual` block",
+                    )
+                }
+            }
+        }
+        if !fns.is_empty() {
+            if !enums.is_empty() {
+                return err(
+                    span,
+                    "a `mutual` block is either all enums or all functions",
+                );
+            }
+            return self.elab_mutual_fns(&fns, span);
+        }
+        if enums.is_empty() {
+            return err(span, "an empty `mutual` block");
+        }
+        self.elab_enum_family(&enums, span)
     }
 
     /// The kernel-visible name of a declaration made in the current namespace.
@@ -786,6 +819,7 @@ impl Elaborator {
                 in_top: false,
                 deep: None,
                 wf: None,
+                mutual: None,
             });
         }
         let ret = match &f.ret {
@@ -910,30 +944,54 @@ impl Elaborator {
     }
 
     fn elab_enum(&mut self, d: &EnumDecl, span: Span) -> R<()> {
-        if !d.indices.is_empty() {
+        self.elab_enum_family(&[d], span)
+    }
+
+    /// One or several (`mutual { enum A .. enum B .. }`) enums, as one inductive family.
+    fn elab_enum_family(&mut self, ds: &[&EnumDecl], span: Span) -> R<()> {
+        if ds.iter().any(|d| !d.indices.is_empty()) {
             // dependent `match` and index equations use the arithmetic library
             self.load_omega();
         }
-        // `: Prop` makes an inductive predicate, otherwise a `Type`
-        let level = match d.sort.as_ref().map(|e| &e.kind) {
-            None => 1,
-            Some(ExprKind::Var(n)) if n == "Type" => 1,
-            Some(ExprKind::Var(n)) if n == "Prop" => 0,
-            Some(_) => {
+        let nparams = ds[0]
+            .generics
+            .iter()
+            .filter(|g| !g.name.name.starts_with('\''))
+            .count();
+        let mut level0 = None;
+        let mut ind_tys = Vec::new();
+        for d in ds {
+            // `: Prop` makes an inductive predicate, otherwise a `Type`
+            let level = match d.sort.as_ref().map(|e| &e.kind) {
+                None => 1,
+                Some(ExprKind::Var(n)) if n == "Type" => 1,
+                Some(ExprKind::Var(n)) if n == "Prop" => 0,
+                Some(_) => {
+                    return err(
+                        d.sort.as_ref().map_or(span, |e| e.span),
+                        "an enum is a `Type` or a `Prop`",
+                    )
+                }
+            };
+            if *level0.get_or_insert(level) != level {
                 return err(
-                    d.sort.as_ref().map_or(span, |e| e.span),
-                    "an enum is a `Type` or a `Prop`",
-                )
+                    d.name.span,
+                    "the enums of a `mutual` group must all be `Type` or all `Prop`",
+                );
             }
-        };
-        let ind_ty = {
-            let mut cx = self.cx();
-            let (pfv, _) = cx.elab_binders(&d.generics, &[])?;
             let declared = d
                 .generics
                 .iter()
                 .filter(|g| !g.name.name.starts_with('\''))
                 .count();
+            if declared != nparams {
+                return err(
+                    d.name.span,
+                    "the enums of a `mutual` group must have the same type parameters",
+                );
+            }
+            let mut cx = self.cx();
+            let (pfv, _) = cx.elab_binders(&d.generics, &[])?;
             if pfv.len() != declared {
                 return err(
                     span,
@@ -947,15 +1005,21 @@ impl Elaborator {
                 cx.scope.push((n.name.clone(), fvar(fv)));
                 all.push(fv);
             }
-            cx.close(&all, &sort(Level::of_nat(level)), true, span)?
-        };
-        let name = d.name.name.clone();
-        // scratch environment in which the type is visible, for recursive fields
+            ind_tys.push(cx.close(&all, &sort(Level::of_nat(level)), true, span)?);
+        }
+        // scratch environment in which all the types are visible, for recursive fields
         let mut scratch = self.env.clone();
-        from_kernel(scratch.add_axiom(&name, &[], ind_ty.clone()), d.name.span)?;
-        let mut ctors = Vec::new();
-        let mut local_counts = Vec::new();
-        {
+        for (d, ty) in ds.iter().zip(&ind_tys) {
+            from_kernel(
+                scratch.add_axiom(&d.name.name, &[], ty.clone()),
+                d.name.span,
+            )?;
+        }
+        let mut types = Vec::new();
+        let mut local_counts: Vec<(String, usize)> = Vec::new();
+        for (d, ind_ty) in ds.iter().zip(&ind_tys) {
+            let name = d.name.name.clone();
+            let mut ctors: Vec<(Name, T)> = Vec::new();
             let mut cx = Cx::new(&scratch, &self.masks, &self.aliases, &self.tables);
             for v in &d.variants {
                 let (pfv, _) = cx.elab_binders(&d.generics, &[])?;
@@ -985,34 +1049,47 @@ impl Elaborator {
                 cx.solve_goals(true)?;
                 let all: Vec<u32> = pfv.iter().chain(&lfv).chain(&fields).copied().collect();
                 let cty = cx.close(&all, &result, true, v.name.span)?;
-                ctors.push((format!("{name}.{}", v.name.name).as_str().into(), cty));
-                local_counts.push(lfv.len());
+                let cname = format!("{name}.{}", v.name.name);
+                local_counts.push((cname.clone(), lfv.len()));
+                ctors.push((cname.as_str().into(), cty));
                 cx.scope.clear();
             }
-        }
-        let nparams = d
-            .generics
-            .iter()
-            .filter(|g| !g.name.name.starts_with('\''))
-            .count();
-        let cnames: Vec<String> = ctors
-            .iter()
-            .map(|(n, _): &(Name, T)| n.to_string())
-            .collect();
-        self.register_inductive(
-            InductiveDecl {
+            types.push(apex_kernel::TypeDecl {
                 name: name.as_str().into(),
+                ty: ind_ty.clone(),
+                ctors,
+            });
+        }
+        let cnames: Vec<String> = types
+            .iter()
+            .flat_map(|t| t.ctors.iter().map(|(n, _)| n.to_string()))
+            .collect();
+        from_kernel(
+            self.env.add_mutual(apex_kernel::MutualDecl {
                 lparams: vec![],
                 nparams,
-                ty: ind_ty,
-                ctors,
-            },
-            nparams,
+                types,
+            }),
             span,
         )?;
+        for d in ds {
+            let name = &d.name.name;
+            for v in &d.variants {
+                let cn = format!("{name}.{}", v.name.name);
+                // parameters are implicit in constructors
+                self.masks.insert(cn.clone(), vec![Bk::Imp; nparams]);
+                if v.name.name != "mk"
+                    && self.env.get(&v.name.name).is_none()
+                    && !self.aliases.contains_key(&v.name.name)
+                {
+                    self.aliases.insert(v.name.name.clone(), cn);
+                }
+            }
+        }
         // constructor-local binders are implicit too
-        for (cn, n) in cnames.iter().zip(local_counts) {
-            self.masks.insert(cn.clone(), vec![Bk::Imp; nparams + n]);
+        for (cn, n) in local_counts {
+            debug_assert!(cnames.contains(&cn));
+            self.masks.insert(cn, vec![Bk::Imp; nparams + n]);
         }
         Ok(())
     }
@@ -1459,6 +1536,17 @@ struct RecCtx {
     deep: Option<Deep>,
     /// Well-founded recursion (`termination_by`).
     wf: Option<wf::WfCtx>,
+    /// A function of a `mutual` group of structurally recursive functions.
+    mutual: Option<MutualCtx>,
+}
+
+/// The other functions of a mutually recursive group and the motives of the shared recursor.
+#[derive(Clone)]
+struct MutualCtx {
+    /// Name and number of arguments of each function.
+    siblings: Vec<(String, usize)>,
+    /// One motive per type of the family, over this function's type parameters.
+    motives: Vec<T>,
 }
 
 /// State of a function compiled through `I.brecOn`: every recursive field in scope
@@ -1527,6 +1615,8 @@ struct Cx<'a> {
     pending_call: T,
     /// Binder names per constructor for the cases of a dependent `match`.
     case_names: Option<HashMap<String, Vec<String>>>,
+    /// Minor premises of the top-level `match` of a function in a `mutual` group.
+    mutual_minors: Vec<(String, T)>,
 }
 
 fn path_name(e: &Expr) -> Option<String> {
@@ -1562,6 +1652,7 @@ impl<'a> Cx<'a> {
             dep_if: false,
             pending_call: lit(0),
             case_names: None,
+            mutual_minors: Vec::new(),
         }
     }
 
@@ -1797,7 +1888,7 @@ impl<'a> Cx<'a> {
         match &e.kind {
             ExprKind::Var(_) | ExprKind::Field(..) => {
                 if let Some(path) = path_name(e) {
-                    if self.rec.as_ref().is_some_and(|r| r.name == path) {
+                    if self.is_rec_name(&path) {
                         return err(
                             e.span,
                             "a recursive function must be called with all of its arguments",
@@ -1869,8 +1960,8 @@ impl<'a> Cx<'a> {
             }
             ExprKind::Call(f, args) | ExprKind::TypeApp(f, args) => {
                 if let Some(p) = path_name(f) {
-                    if self.rec.as_ref().is_some_and(|r| r.name == p) {
-                        return self.elab_rec_call(args, exp, e.span);
+                    if self.is_rec_name(&p) {
+                        return self.elab_rec_call(&p, args, exp, e.span);
                     }
                 }
                 let head = match path_name(f).and_then(|p| self.head_of(&p)) {
@@ -3368,6 +3459,8 @@ impl<'a> Cx<'a> {
             info.ctors.iter().map(|c| c.to_string()).collect(),
             info.lparams.len(),
         );
+        let family: Vec<String> = info.family.iter().map(|n| n.to_string()).collect();
+        let info_rec = info.rec.clone();
         let params = targs[..info.nparams].to_vec();
         let iname = iname.to_string();
         let ilevels = ilevels.clone();
@@ -3380,6 +3473,13 @@ impl<'a> Cx<'a> {
                 .and_then(|d| d.below_of.get(&x).map(|bt| (d.clone(), bt.clone())))
         });
         let in_deep = self.rec.as_ref().is_some_and(|rc| rc.deep.is_some());
+        let mutual_ms: Option<Vec<T>> = if top && !in_deep {
+            self.rec
+                .as_ref()
+                .and_then(|rc| rc.mutual.as_ref().map(|m| m.motives.clone()))
+        } else {
+            None
+        };
         let others: Vec<u32> = match (&self.rec, top && !in_deep) {
             (Some(rc), true) => rc
                 .explicit
@@ -3418,141 +3518,224 @@ impl<'a> Cx<'a> {
         }
         let motive = lam(Mult::Omega, xty.clone(), motive_abs.clone());
 
-        let mut minors = Vec::new();
-        for cname in &ctors {
-            let cty = from_kernel(self.env.const_type(cname, &ilevels), span)?;
-            let rest = from_kernel(self.tc.instantiate_pis(&cty, &params), span)?;
-            let (fields, _) = from_kernel(self.tc.telescope(&rest, None), span)?;
-            let fterms: Vec<T> = fields.iter().map(|&f| fvar(f)).collect();
-            let ctor_app = mk_apps(
-                &cnst(cname.as_str().into(), ilevels.clone()),
-                &[params.clone(), fterms].concat(),
-            );
-            let ret_c = instantiate(&ret_abs, &ctor_app);
-
-            // induction hypotheses for recursive fields
-            let mut ihs = Vec::new();
-            for &f in &fields {
-                let fty = from_kernel(self.tc.local_ty(f), span)?;
-                if !contains_const(&fty, &iname) {
-                    continue;
-                }
-                let (xs, _) = from_kernel(self.tc.telescope(&fty, None), span)?;
-                let applied = mk_apps(&fvar(f), &xs.iter().map(|&v| fvar(v)).collect::<Vec<_>>());
-                let ih_res = instantiate(&motive_abs, &applied);
-                let ih_ty = self.tc.mk_pi(&xs, &ih_res);
-                let ih = self.tc.fresh("ih", ih_ty, Mult::Omega);
-                if top && !in_deep {
-                    if let Some(rc) = &mut self.rec {
-                        rc.fields.insert(f, fvar(ih));
-                    }
-                }
-                ihs.push(ih);
-            }
-
-            // course-of-values: the results for the subterms come out of `below`
-            let mut cb = None;
-            if let Some((d, _)) = &deep_ctx {
-                let rec_fields: Vec<u32> = {
-                    let mut v = Vec::new();
-                    for &f in &fields {
-                        let fty = from_kernel(self.tc.local_ty(f), span)?;
-                        if contains_const(&fty, &iname) {
-                            v.push(f);
-                        }
-                    }
-                    v
-                };
-                let b2_ty = self.below_type(d, ctor_app.clone());
-                let b2 = self.tc.fresh("b", b2_ty, Mult::Omega);
-                let comps = self.below_components(b2, rec_fields.len(), span)?;
-                if let Some(rc) = &mut self.rec {
-                    for (f, (ih, bt)) in rec_fields.iter().zip(comps) {
-                        rc.fields.insert(*f, ih);
-                        if let Some(dd) = &mut rc.deep {
-                            dd.below_of.insert(*f, bt);
-                        }
-                    }
-                }
-                cb = Some(b2);
-            }
-
-            // specialize the rows to this constructor
-            let mut new_cols: Vec<u32> = cols[..j].to_vec();
-            new_cols.extend(&fields);
-            new_cols.extend(&cols[j + 1..]);
-            let mut new_rows = Vec::new();
-            for row in &rows {
-                let (before, after) = (&row.pats[..j], &row.pats[j + 1..]);
-                let mut binds = row.binds.clone();
-                let mid: Vec<Pat> = match &row.pats[j] {
-                    Pat::Ctor(c, subs) if c == cname => {
-                        if subs.len() != fields.len() {
-                            return err(
-                                span,
-                                format!(
-                                    "constructor `{cname}` takes {} fields, the pattern has {}",
-                                    fields.len(),
-                                    subs.len()
-                                ),
-                            );
-                        }
-                        subs.clone()
-                    }
-                    Pat::Ctor(..) => continue,
-                    Pat::Var(n) => {
-                        binds.push((n.clone(), ctor_app.clone()));
-                        vec![Pat::Wild; fields.len()]
-                    }
-                    Pat::Wild => vec![Pat::Wild; fields.len()],
-                };
-                let pats = [before, &mid[..], after].concat();
-                new_rows.push(Row {
-                    pats,
-                    binds,
-                    body: row.body,
-                });
-            }
-            if new_rows.is_empty() {
-                return err(span, format!("non-exhaustive patterns: missing `{cname}`"));
-            }
-            // inside the branch the scrutinee *is* the constructor application
-            let xt = fvar(x);
-            let saved = self.scope.clone();
-            for (_, t) in self.scope.iter_mut() {
-                if *t == xt {
-                    *t = ctor_app.clone();
-                }
-            }
-            if let Some(rc) = &mut self.rec {
-                rc.refined.push((ctor_app.clone(), x));
-            }
-            let sub = self.compile_match(new_cols, new_rows, &ret_c, false, span);
-            self.scope = saved;
-            let sub = sub?;
-            self.tc.zonk_locals();
-            let sub = self.tc.zonk(&sub);
-            let body = if top || !others.is_empty() {
-                self.tc.mk_lam(&others, &sub)
+        let punit_lvl = if large {
+            rec_levels[0].clone()
+        } else {
+            Level::Zero
+        };
+        // a mutual family: the other types get the constant `PUnit` motive and
+        // `PUnit.unit` minors, only this type's constructors carry real cases
+        let mut motives_all: Vec<T> = Vec::new();
+        for (fi, fname) in family.iter().enumerate() {
+            if let Some(ms) = &mutual_ms {
+                motives_all.push(ms[fi].clone());
+            } else if *fname == iname {
+                motives_all.push(motive.clone());
             } else {
-                sub
-            };
-            let body = match cb {
-                Some(b2) => self.tc.mk_lam(&[b2], &body),
-                None => body,
-            };
-            let binders: Vec<u32> = fields.iter().chain(&ihs).copied().collect();
-            minors.push(self.tc.mk_lam(&binders, &body));
+                let fty = from_kernel(self.env.const_type(fname, &ilevels), span)?;
+                let fty = from_kernel(self.tc.instantiate_pis(&fty, &params), span)?;
+                let (idx, _) = from_kernel(self.tc.telescope(&fty, None), span)?;
+                if !idx.is_empty() {
+                    return err(span, "matching on mutual indexed families is not supported");
+                }
+                let kt = mk_apps(&cnst(fname.as_str().into(), ilevels.clone()), &params);
+                motives_all.push(lam(
+                    Mult::Omega,
+                    kt,
+                    cnst("PUnit".into(), vec![punit_lvl.clone()]),
+                ));
+            }
+        }
+        let mut rty = from_kernel(self.env.const_type(&info_rec, &rec_levels), span)?;
+        for p in params.iter().chain(motives_all.iter()) {
+            match &*rty {
+                Term::Pi(_, _, b) => rty = instantiate(b, p),
+                _ => return err(span, "internal error: malformed recursor type"),
+            }
+        }
+
+        let mut minors = Vec::new();
+        for fname in &family {
+            if *fname != iname {
+                let fctors: Vec<String> = match self.env.get(fname) {
+                    Some(Decl::Inductive(i)) => i.ctors.iter().map(|c| c.to_string()).collect(),
+                    _ => return err(span, "internal error: missing family member"),
+                };
+                for _ in &fctors {
+                    let (dom, rest) = match &*rty {
+                        Term::Pi(_, d, b) => (d.clone(), b.clone()),
+                        _ => return err(span, "internal error: malformed recursor type"),
+                    };
+                    let m = if mutual_ms.is_some() {
+                        // supplied by the function of that type: a stand-in of the right type
+                        let fv = self.tc.fresh("foreign", head_beta(&dom), Mult::Omega);
+                        fvar(fv)
+                    } else {
+                        let (bs, _) = from_kernel(self.tc.telescope(&head_beta(&dom), None), span)?;
+                        let unit = cnst("PUnit.unit".into(), vec![punit_lvl.clone()]);
+                        self.tc.mk_lam(&bs, &unit)
+                    };
+                    rty = instantiate(&rest, &m);
+                    minors.push(m);
+                }
+                continue;
+            }
+            for cname in &ctors {
+                let cty = from_kernel(self.env.const_type(cname, &ilevels), span)?;
+                let rest = from_kernel(self.tc.instantiate_pis(&cty, &params), span)?;
+                let (fields, _) = from_kernel(self.tc.telescope(&rest, None), span)?;
+                let fterms: Vec<T> = fields.iter().map(|&f| fvar(f)).collect();
+                let ctor_app = mk_apps(
+                    &cnst(cname.as_str().into(), ilevels.clone()),
+                    &[params.clone(), fterms].concat(),
+                );
+                let ret_c = instantiate(&ret_abs, &ctor_app);
+
+                // induction hypotheses for recursive fields
+                let mut ihs = Vec::new();
+                for &f in &fields {
+                    let fty = from_kernel(self.tc.local_ty(f), span)?;
+                    if !family.iter().any(|n| contains_const(&fty, n)) {
+                        continue;
+                    }
+                    let (xs, fbody) = from_kernel(self.tc.telescope(&fty, None), span)?;
+                    let fam_idx = match &*app_spine(&fbody).0 {
+                        Term::Const(n, _) => family.iter().position(|m| **n == **m),
+                        _ => None,
+                    };
+                    let own = fam_idx.is_some_and(|k| family[k] == iname);
+                    let applied =
+                        mk_apps(&fvar(f), &xs.iter().map(|&v| fvar(v)).collect::<Vec<_>>());
+                    let ih_res = match (&mutual_ms, fam_idx) {
+                        (Some(ms), Some(k)) => head_beta(&app(
+                            ms[k].clone(),
+                            mk_apps(&fvar(f), &xs.iter().map(|&v| fvar(v)).collect::<Vec<_>>()),
+                        )),
+                        _ if own => instantiate(&motive_abs, &applied),
+                        _ => cnst("PUnit".into(), vec![punit_lvl.clone()]),
+                    };
+                    let ih_ty = self.tc.mk_pi(&xs, &ih_res);
+                    let ih = self.tc.fresh("ih", ih_ty, Mult::Omega);
+                    if top && !in_deep && (own || mutual_ms.is_some()) {
+                        if let Some(rc) = &mut self.rec {
+                            rc.fields.insert(f, fvar(ih));
+                        }
+                    }
+                    ihs.push(ih);
+                }
+
+                // course-of-values: the results for the subterms come out of `below`
+                let mut cb = None;
+                if let Some((d, _)) = &deep_ctx {
+                    let rec_fields: Vec<u32> = {
+                        let mut v = Vec::new();
+                        for &f in &fields {
+                            let fty = from_kernel(self.tc.local_ty(f), span)?;
+                            if contains_const(&fty, &iname) {
+                                v.push(f);
+                            }
+                        }
+                        v
+                    };
+                    let b2_ty = self.below_type(d, ctor_app.clone());
+                    let b2 = self.tc.fresh("b", b2_ty, Mult::Omega);
+                    let comps = self.below_components(b2, rec_fields.len(), span)?;
+                    if let Some(rc) = &mut self.rec {
+                        for (f, (ih, bt)) in rec_fields.iter().zip(comps) {
+                            rc.fields.insert(*f, ih);
+                            if let Some(dd) = &mut rc.deep {
+                                dd.below_of.insert(*f, bt);
+                            }
+                        }
+                    }
+                    cb = Some(b2);
+                }
+
+                // specialize the rows to this constructor
+                let mut new_cols: Vec<u32> = cols[..j].to_vec();
+                new_cols.extend(&fields);
+                new_cols.extend(&cols[j + 1..]);
+                let mut new_rows = Vec::new();
+                for row in &rows {
+                    let (before, after) = (&row.pats[..j], &row.pats[j + 1..]);
+                    let mut binds = row.binds.clone();
+                    let mid: Vec<Pat> = match &row.pats[j] {
+                        Pat::Ctor(c, subs) if c == cname => {
+                            if subs.len() != fields.len() {
+                                return err(
+                                    span,
+                                    format!(
+                                        "constructor `{cname}` takes {} fields, the pattern has {}",
+                                        fields.len(),
+                                        subs.len()
+                                    ),
+                                );
+                            }
+                            subs.clone()
+                        }
+                        Pat::Ctor(..) => continue,
+                        Pat::Var(n) => {
+                            binds.push((n.clone(), ctor_app.clone()));
+                            vec![Pat::Wild; fields.len()]
+                        }
+                        Pat::Wild => vec![Pat::Wild; fields.len()],
+                    };
+                    let pats = [before, &mid[..], after].concat();
+                    new_rows.push(Row {
+                        pats,
+                        binds,
+                        body: row.body,
+                    });
+                }
+                if new_rows.is_empty() {
+                    return err(span, format!("non-exhaustive patterns: missing `{cname}`"));
+                }
+                // inside the branch the scrutinee *is* the constructor application
+                let xt = fvar(x);
+                let saved = self.scope.clone();
+                for (_, t) in self.scope.iter_mut() {
+                    if *t == xt {
+                        *t = ctor_app.clone();
+                    }
+                }
+                if let Some(rc) = &mut self.rec {
+                    rc.refined.push((ctor_app.clone(), x));
+                }
+                let sub = self.compile_match(new_cols, new_rows, &ret_c, false, span);
+                self.scope = saved;
+                let sub = sub?;
+                self.tc.zonk_locals();
+                let sub = self.tc.zonk(&sub);
+                let body = if top || !others.is_empty() {
+                    self.tc.mk_lam(&others, &sub)
+                } else {
+                    sub
+                };
+                let body = match cb {
+                    Some(b2) => self.tc.mk_lam(&[b2], &body),
+                    None => body,
+                };
+                let binders: Vec<u32> = fields.iter().chain(&ihs).copied().collect();
+                let m = self.tc.mk_lam(&binders, &body);
+                if mutual_ms.is_some() {
+                    self.mutual_minors.push((cname.clone(), m.clone()));
+                }
+                match &*rty {
+                    Term::Pi(_, _, b) => rty = instantiate(b, &m),
+                    _ => return err(span, "internal error: malformed recursor type"),
+                }
+                minors.push(m);
+            }
         }
         let mut args = params;
-        args.push(motive);
+        args.extend(motives_all);
         args.extend(minors);
         args.push(fvar(x));
         if let Some((_, bt)) = &deep_ctx {
             args.push(bt.clone());
         }
         args.extend(others.iter().map(|&o| fvar(o)));
-        Ok(mk_apps(&cnst(rec_name.as_str().into(), rec_levels), &args))
+        Ok(mk_apps(&cnst(info_rec.clone(), rec_levels), &args))
     }
 
     /// Prepare course-of-values recursion on the decreasing parameter.
@@ -3713,25 +3896,47 @@ impl<'a> Cx<'a> {
 
     /// `f(args)` inside the body of a structurally recursive `f`: becomes the
     /// induction hypothesis of the matched parameter's field.
-    fn elab_rec_call(&mut self, args: &[Expr], exp: Option<&T>, span: Span) -> R<T> {
+    fn is_rec_name(&self, p: &str) -> bool {
+        self.rec.as_ref().is_some_and(|r| {
+            r.name == p
+                || r.mutual
+                    .as_ref()
+                    .is_some_and(|m| m.siblings.iter().any(|(n, _)| n == p))
+        })
+    }
+
+    fn elab_rec_call(&mut self, name: &str, args: &[Expr], exp: Option<&T>, span: Span) -> R<T> {
         if let Some(wf) = self.rec.as_ref().and_then(|rc| rc.wf.clone()) {
             return self.elab_wf_call(wf, args, exp, span);
         }
         let rc = self.rec.as_ref().expect("recursion context");
         let (decr, explicit) = (rc.decr, rc.explicit.clone());
-        if args.len() != explicit.len() {
+        // a call of another function of the `mutual` group: it decreases on its first argument
+        let sibling = if rc.name == name {
+            None
+        } else {
+            rc.mutual
+                .as_ref()
+                .and_then(|m| m.siblings.iter().find(|(n, _)| n == name).map(|(_, k)| *k))
+        };
+        let nargs = sibling.unwrap_or(explicit.len());
+        if args.len() != nargs {
             return err(
                 span,
                 "a recursive call must supply all of the function's arguments",
             );
         }
-        let k = explicit
-            .iter()
-            .position(|&p| p == decr)
-            .expect("decreasing parameter is explicit");
+        let k = if sibling.is_some() {
+            0
+        } else {
+            explicit
+                .iter()
+                .position(|&p| p == decr)
+                .expect("decreasing parameter is explicit")
+        };
         let dty = from_kernel(self.tc.local_ty(decr), span)?;
         // a field of an indexed family has other indices than the parameter
-        let arg = if self.is_indexed(decr) {
+        let arg = if sibling.is_some() || self.is_indexed(decr) {
             self.elab(&args[k], None)?
         } else {
             self.elab_check(&args[k], &dty)?

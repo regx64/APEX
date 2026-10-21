@@ -11,6 +11,7 @@ use super::*;
 
 mod auto;
 mod imatch;
+mod noconf;
 mod omega;
 
 /// Options of `simp`.
@@ -447,6 +448,7 @@ impl<'a> Cx<'a> {
                 Ok(vec![ng])
             }
             TacticKind::Contradiction => self.t_contradiction(st, g, span),
+            TacticKind::Injection(h, names) => self.t_injection(st, g, h, names, span),
             TacticKind::Symm => {
                 let Some((l, alpha, a, b)) = self.eq_parts(&g.target) else {
                     return err(span, "`symm` needs a goal of the form `a = b`");
@@ -897,6 +899,11 @@ impl<'a> Cx<'a> {
             if matches!(&*w, Term::Const(n, _) if &**n == "False") {
                 let pf = mk_apps(&elim, &[tgt.clone(), v.clone()]);
                 self.solve(st, &g, pf);
+                return Ok(vec![]);
+            }
+            // a hypothesis `C1 .. = C2 ..` between different constructors
+            if let Some(pf) = self.discriminate(v, ty, span)? {
+                self.solve(st, &g, mk_apps(&elim, &[tgt.clone(), pf]));
                 return Ok(vec![]);
             }
             // a hypothesis `P -> False` together with a hypothesis `P`
@@ -2018,12 +2025,6 @@ impl<'a> Cx<'a> {
             Some(Decl::Rec(r)) => r.clone(),
             _ => return err(span, "internal error: missing recursor"),
         };
-        if rec_info.nmotives != 1 {
-            return err(
-                span,
-                format!("`{what}` on mutually inductive types is not supported yet"),
-            );
-        }
         let target = self.tc.zonk(&g.target);
         let lvl = self.sort_level_of(&target, span)?;
         let rec_levels: Vec<Level> = if rec_info.lparams.len() == info.lparams.len() + 1 {
@@ -2044,8 +2045,37 @@ impl<'a> Cx<'a> {
         let motive = self
             .tc
             .mk_lam(&[idx_fvs.clone(), vec![xid]].concat(), &target);
+        // a mutual family: the other types get the constant `PUnit` motive
+        let punit_lvl = if rec_levels.len() > info.lparams.len() {
+            rec_levels[0].clone()
+        } else {
+            Level::Zero
+        };
+        let mut motives_all: Vec<T> = Vec::new();
+        for fname in &info.family {
+            if **fname == *iname {
+                motives_all.push(motive.clone());
+            } else {
+                let fty = from_kernel(self.env.const_type(fname, &ilevels), span)?;
+                let fty = from_kernel(self.tc.instantiate_pis(&fty, &params), span)?;
+                let (fidx, _) = from_kernel(self.tc.telescope(&fty, None), span)?;
+                if !fidx.is_empty() {
+                    return err(
+                        span,
+                        format!("`{what}` on mutual indexed families is not supported"),
+                    );
+                }
+                let kt = mk_apps(&cnst(fname.clone(), ilevels.clone()), &params);
+                motives_all.push(lam(
+                    Mult::Omega,
+                    kt,
+                    cnst("PUnit".into(), vec![punit_lvl.clone()]),
+                ));
+            }
+        }
+        debug_assert_eq!(motives_all.len(), rec_info.nmotives);
         let mut rty = from_kernel(self.env.const_type(&info.rec, &rec_levels), span)?;
-        for p in params.iter().chain(std::iter::once(&motive)) {
+        for p in params.iter().chain(motives_all.iter()) {
             match &*rty {
                 Term::Pi(_, _, b) => rty = instantiate(b, p),
                 _ => return err(span, "internal error: malformed recursor type"),
@@ -2071,81 +2101,101 @@ impl<'a> Cx<'a> {
         let mut minors = Vec::new();
         let mut goals = Vec::new();
         let mut arm_goals = Vec::new();
-        for (i, cname) in info.ctors.iter().enumerate() {
-            let nfields = match self.env.get(cname) {
-                Some(Decl::Ctor(c)) => c.nfields,
-                _ => return err(span, "internal error: missing constructor"),
-            };
-            let (dom, rest) = match &*rty {
-                Term::Pi(_, d, b) => (d.clone(), b.clone()),
-                _ => return err(span, "internal error: malformed recursor type"),
-            };
-            let arm = arms.and_then(|a| a.iter().find(|a| a.ctor.name == ctor_short[i]));
-            let given: Vec<String> = match arm {
-                Some(a) => a.binders.iter().map(|b| b.name.clone()).collect(),
-                // a dependent `match` names the binders of each case itself
-                None => self
-                    .case_names
-                    .as_ref()
-                    .and_then(|m| m.get(&ctor_short[i]).cloned())
-                    .unwrap_or_default(),
-            };
-            let mut fvs = Vec::new();
-            let mut cur = dom.clone();
-            let mut scope: Vec<(String, T)> = g
-                .scope
-                .iter()
-                .filter(|(_, v)| match &**v {
-                    Term::FVar(i) => *i != xid && !idx_fvs.contains(i),
-                    _ => true,
-                })
-                .cloned()
-                .collect();
-            let mut k = 0;
-            while let Term::Pi(m, d, b) = &*cur.clone() {
-                let is_ih = k >= nfields;
-                let name = match given.get(k) {
-                    Some(n) => n.clone(),
-                    None if is_ih => "ih".to_string(),
-                    None => format!("x{}", k + 1),
+        for fname in &info.family {
+            if **fname != *iname {
+                let nf = match self.env.get(fname) {
+                    Some(Decl::Inductive(i)) => i.ctors.len(),
+                    _ => return err(span, "internal error: missing family member"),
                 };
-                let fv = self.tc.fresh(&name, head_beta(d), *m);
-                fvs.push(fv);
-                if !is_ih || with_ih {
-                    scope.push((name, fvar(fv)));
+                for _ in 0..nf {
+                    let (dom, rest) = match &*rty {
+                        Term::Pi(_, d, b) => (d.clone(), b.clone()),
+                        _ => return err(span, "internal error: malformed recursor type"),
+                    };
+                    let (bs, _) = from_kernel(self.tc.telescope(&head_beta(&dom), None), span)?;
+                    let unit = cnst("PUnit.unit".into(), vec![punit_lvl.clone()]);
+                    let m = self.tc.mk_lam(&bs, &unit);
+                    rty = instantiate(&rest, &m);
+                    minors.push(m);
                 }
-                cur = instantiate(b, &fvar(fv));
-                k += 1;
+                continue;
             }
-            if let Some(a) = arm {
-                if a.binders.len() > if with_ih { k } else { nfields } {
-                    return err(
-                        a.ctor.span,
-                        format!("`{}` binds too many names", a.ctor.name),
-                    );
+            for (i, cname) in info.ctors.iter().enumerate() {
+                let nfields = match self.env.get(cname) {
+                    Some(Decl::Ctor(c)) => c.nfields,
+                    _ => return err(span, "internal error: missing constructor"),
+                };
+                let (dom, rest) = match &*rty {
+                    Term::Pi(_, d, b) => (d.clone(), b.clone()),
+                    _ => return err(span, "internal error: malformed recursor type"),
+                };
+                let arm = arms.and_then(|a| a.iter().find(|a| a.ctor.name == ctor_short[i]));
+                let given: Vec<String> = match arm {
+                    Some(a) => a.binders.iter().map(|b| b.name.clone()).collect(),
+                    // a dependent `match` names the binders of each case itself
+                    None => self
+                        .case_names
+                        .as_ref()
+                        .and_then(|m| m.get(&ctor_short[i]).cloned())
+                        .unwrap_or_default(),
+                };
+                let mut fvs = Vec::new();
+                let mut cur = dom.clone();
+                let mut scope: Vec<(String, T)> = g
+                    .scope
+                    .iter()
+                    .filter(|(_, v)| match &**v {
+                        Term::FVar(i) => *i != xid && !idx_fvs.contains(i),
+                        _ => true,
+                    })
+                    .cloned()
+                    .collect();
+                let mut k = 0;
+                while let Term::Pi(m, d, b) = &*cur.clone() {
+                    let is_ih = k >= nfields;
+                    let name = match given.get(k) {
+                        Some(n) => n.clone(),
+                        None if is_ih => "ih".to_string(),
+                        None => format!("x{}", k + 1),
+                    };
+                    let fv = self.tc.fresh(&name, head_beta(d), *m);
+                    fvs.push(fv);
+                    if !is_ih || with_ih {
+                        scope.push((name, fvar(fv)));
+                    }
+                    cur = instantiate(b, &fvar(fv));
+                    k += 1;
                 }
-            }
-            let new_target = head_beta(&self.tc.zonk(&cur));
-            let mv = self.tc.new_mvar(new_target.clone());
-            let sub = Goal {
-                mv: mvar_id(&mv),
-                scope,
-                target: new_target,
-                tag: ctor_short[i].clone(),
-            };
-            let sub_mv = sub.mv;
-            let sub = self.reintro(st, sub, reintro, span)?;
-            let lam_mv = self.tc.new_mvar(dom);
-            st.sol.insert(mvar_id(&lam_mv), Sol::Lam(fvs, sub_mv));
-            minors.push(lam_mv.clone());
-            rty = instantiate(&rest, &lam_mv);
-            match arm {
-                Some(a) => arm_goals.push((sub, a.body.clone())),
-                None => goals.push(sub),
+                if let Some(a) = arm {
+                    if a.binders.len() > if with_ih { k } else { nfields } {
+                        return err(
+                            a.ctor.span,
+                            format!("`{}` binds too many names", a.ctor.name),
+                        );
+                    }
+                }
+                let new_target = head_beta(&self.tc.zonk(&cur));
+                let mv = self.tc.new_mvar(new_target.clone());
+                let sub = Goal {
+                    mv: mvar_id(&mv),
+                    scope,
+                    target: new_target,
+                    tag: ctor_short[i].clone(),
+                };
+                let sub_mv = sub.mv;
+                let sub = self.reintro(st, sub, reintro, span)?;
+                let lam_mv = self.tc.new_mvar(dom);
+                st.sol.insert(mvar_id(&lam_mv), Sol::Lam(fvs, sub_mv));
+                minors.push(lam_mv.clone());
+                rty = instantiate(&rest, &lam_mv);
+                match arm {
+                    Some(a) => arm_goals.push((sub, a.body.clone())),
+                    None => goals.push(sub),
+                }
             }
         }
         let mut args = params;
-        args.push(motive);
+        args.extend(motives_all);
         args.extend(minors);
         args.extend(idx_terms);
         args.push(fvar(xid));

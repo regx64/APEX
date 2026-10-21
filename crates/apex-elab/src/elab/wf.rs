@@ -212,6 +212,7 @@ impl Elaborator {
                 refined: Vec::new(),
                 in_top: false,
                 deep: None,
+                mutual: None,
                 wf: Some(WfCtx {
                     n,
                     ih,

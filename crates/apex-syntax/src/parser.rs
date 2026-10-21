@@ -78,6 +78,7 @@ const TACTIC_WORDS: &[&str] = &[
     "induction",
     "cases",
     "revert",
+    "injection",
     "try",
     "repeat",
     "first",
@@ -485,6 +486,16 @@ impl Parser {
                 K::Revert(names)
             }
             "exists" => K::Exists(self.expr()?),
+            "injection" => {
+                let h = self.expr()?;
+                let names = if matches!(self.peek(), T::Ident(w) if w == "with") {
+                    self.bump();
+                    self.binder_names()?
+                } else {
+                    Vec::new()
+                };
+                K::Injection(h, names)
+            }
             "cases" => {
                 let v = self.expr()?;
                 K::Cases(v, self.case_arms()?)
@@ -569,6 +580,7 @@ impl Parser {
                         | "prefix"
                         | "macro"
                         | "tactic"
+                        | "mutual"
                 ) =>
             {
                 Some(w.clone())
@@ -591,6 +603,7 @@ impl Parser {
                     ItemKind::Open(name)
                 }
                 "section" => ItemKind::Section(self.item_block()?),
+                "mutual" => ItemKind::Mutual(self.item_block()?),
                 "infixl" | "infixr" | "infix" | "prefix" => {
                     let prec = match self.peek().clone() {
                         T::Nat(n) => {

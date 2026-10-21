@@ -46,6 +46,8 @@ pub enum ItemKind {
     Section(Vec<Item>),
     /// `variable (n: Nat);` adds `n` as a leading parameter of every later declaration that mentions it.
     Variable(Vec<Param>),
+    /// `mutual { enum A .. enum B .. }`
+    Mutual(Vec<Item>),
     /// `import a.b;`: the module `a/b.apex`, loaded by the driver before this file.
     Import(String),
     /// `infixl 65 "+++" => f;`, `prefix 100 "~" => g;`, `macro m(a, b) => e;`: already applied
@@ -334,6 +336,8 @@ pub enum TacticKind {
     Cases(Expr, Option<Vec<CaseArm>>),
     /// Move hypotheses back into the goal as premises.
     Revert(Vec<Ident>),
+    /// `injection h with a b`: the field equations of `h : C as = C bs`.
+    Injection(Expr, Vec<Ident>),
     /// `exists w`: prove `Exists p` by giving the witness.
     Exists(Expr),
     /// `{ ... }`: run on the first goal, which it must close.

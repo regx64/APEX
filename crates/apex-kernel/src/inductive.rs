@@ -178,6 +178,7 @@ impl Env {
                     ctors: ctor_names[k].clone(),
                     is_prop,
                     rec: rec_names[k].clone(),
+                    family: d.types.iter().map(|t| t.name.clone()).collect(),
                 }),
             );
         }
@@ -424,6 +425,7 @@ impl Env {
                     ctors: ctor_names[k].clone(),
                     is_prop,
                     rec: rec_names[k].clone(),
+                    family: d.types.iter().map(|t| t.name.clone()).collect(),
                 }),
             );
             for (ci, (cn, cty)) in t.ctors.iter().enumerate() {

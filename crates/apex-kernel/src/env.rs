@@ -32,6 +32,8 @@ pub struct IndInfo {
     pub ctors: Vec<Name>,
     pub is_prop: bool,
     pub rec: Name,
+    /// All types of the mutual family this type belongs to, in declaration order.
+    pub family: Vec<Name>,
 }
 
 #[derive(Clone)]
