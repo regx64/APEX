@@ -29,6 +29,30 @@ fn main() -> ExitCode {
                 Err((String::new(), apex_span::Span::default()))
             }
         }),
+        (Some("verify"), Some(path)) => run(path, |src| match apex_elab::check_source(path, src) {
+            Ok(el) => {
+                // re-check every declaration with the independent verifier
+                let no_accel = args.iter().any(|a| a == "--no-accel");
+                let data = el.env().export();
+                match apex_verify::verify(&data, apex_verify::Options { accel: !no_accel }) {
+                    Ok(r) => {
+                        println!(
+                            "verified: {path} ({} axioms, {} definitions and theorems, {} inductive parts)",
+                            r.axioms, r.definitions, r.inductive_parts
+                        );
+                        Ok(())
+                    }
+                    Err(msg) => Err((
+                        format!("verification failed: {msg}"),
+                        apex_span::Span::default(),
+                    )),
+                }
+            }
+            Err(rendered) => {
+                eprint!("{rendered}");
+                Err((String::new(), apex_span::Span::default()))
+            }
+        }),
         (Some("run"), Some(path)) => run(path, |src| match apex_eval::run_source(path, src) {
             Ok(out) => {
                 print!("{out}");
@@ -59,7 +83,7 @@ fn main() -> ExitCode {
         (Some("run"), None) => report(project::cmd_run(".")),
         _ => {
             eprintln!(
-                "usage: apex <lex|parse|check|run|doc> <file.apex>\n       apex new <name> | build [dir] | run | test [dir] | repl"
+                "usage: apex <lex|parse|check|verify|run|doc> <file.apex>\n       apex new <name> | build [dir] | run | test [dir] | repl"
             );
             ExitCode::from(2)
         }

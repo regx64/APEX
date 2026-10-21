@@ -10,6 +10,7 @@
 use super::*;
 
 mod auto;
+mod conv;
 mod extra;
 mod imatch;
 mod intarith;
@@ -376,6 +377,10 @@ impl<'a> Cx<'a> {
     /// Close an equation whose sides are definitionally equal.
     fn try_rfl(&mut self, st: &mut Tac, g: &Goal) -> bool {
         if let Some((l, alpha, a, b)) = self.eq_parts(&g.target) {
+            // `conv` goals `s = ?rhs` are closed by an explicit `rfl`, not on the way
+            if matches!(&*self.tc.zonk(&b), Term::MVar(_)) {
+                return false;
+            }
             if self.def_eq(&a, &b) {
                 let pf = mk_apps(&cnst("Eq.refl".into(), vec![l]), &[alpha, a]);
                 self.solve(st, g, pf);
@@ -477,6 +482,7 @@ impl<'a> Cx<'a> {
             TacticKind::Calc(steps) => self.t_calc(st, g, steps, span),
             TacticKind::Trivial => self.t_trivial(st, g, span),
             TacticKind::Ring => self.t_ring(st, g, span),
+            TacticKind::Conv(at, nav, body) => self.t_conv(st, g, at.as_ref(), nav, body, span),
             TacticKind::Symm => {
                 let Some((l, alpha, a, b)) = self.eq_parts(&g.target) else {
                     return err(span, "`symm` needs a goal of the form `a = b`");
@@ -763,6 +769,12 @@ impl<'a> Cx<'a> {
 
     fn close_by_hyp(&mut self, st: &mut Tac, g: &Goal) -> bool {
         let tgt = self.tc.zonk(&g.target);
+        // a `conv` goal `s = ?rhs` is not closed by a hypothesis that would fix `?rhs`
+        if let Some((_, _, _, b)) = self.eq_parts(&tgt) {
+            if matches!(&*self.tc.zonk(&b), Term::MVar(_)) {
+                return false;
+            }
+        }
         for (_, v) in g.scope.iter().rev() {
             if let Term::FVar(id) = &**v {
                 if let Ok(ty) = self.tc.local_ty(*id) {

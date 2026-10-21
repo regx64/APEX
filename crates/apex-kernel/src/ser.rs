@@ -50,6 +50,11 @@ impl Writer {
         }
     }
 
+    /// The index of `n` in the blob's name table (added if new).
+    pub fn intern(&mut self, n: &Name) -> u32 {
+        self.name(n)
+    }
+
     fn name(&mut self, n: &Name) -> u32 {
         if let Some(&i) = self.name_idx.get(n) {
             return i;

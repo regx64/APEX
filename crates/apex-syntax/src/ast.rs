@@ -317,6 +317,17 @@ pub enum RPat {
     Alt(Vec<RPat>),
 }
 
+/// A navigation step of `conv`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavStep {
+    Lhs,
+    Rhs,
+    /// The `k`-th explicit argument (from 1) of the focused application.
+    Arg(usize),
+    /// The function part of the focused application (without its last argument).
+    Fun,
+}
+
 /// One step `a = b := proof` of a `calc` chain (`_` stands for the previous right side).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CalcStep {
@@ -388,6 +399,8 @@ pub enum TacticKind {
     Congr,
     /// `calc { a = b := p; _ = c := q }`
     Calc(Vec<CalcStep>),
+    /// `conv at h { lhs; arg 2; rw [..] }`: rewrite inside one subterm of the goal (or of `h`).
+    Conv(Option<Ident>, Vec<NavStep>, Vec<Tactic>),
     /// `ring`: commutative-semiring identities over `Nat`, by a verified normalizer.
     Ring,
     /// Try `rfl`, `assumption`, `True.intro`, `decide`, `omega`, `simp`.

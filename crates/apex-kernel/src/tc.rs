@@ -24,6 +24,8 @@ pub struct TypeChecker<'a> {
     mvar_assign: HashMap<u32, T>,
     level_assign: HashMap<u32, Level>,
     next_mvar: u32,
+    /// compute library `Nat` functions on literals directly (`APEX_NO_ACCEL=1` turns it off)
+    accel: bool,
 }
 
 /// Saved assignment state, for backtracking a failed unification attempt.
@@ -43,6 +45,7 @@ impl<'a> TypeChecker<'a> {
             mvar_assign: HashMap::new(),
             level_assign: HashMap::new(),
             next_mvar: 0,
+            accel: std::env::var_os("APEX_NO_ACCEL").is_none(),
         }
     }
 
@@ -467,7 +470,21 @@ impl<'a> TypeChecker<'a> {
         let Term::Const(n, _) = &**f else {
             return Ok(None);
         };
-        if args.len() != 2 || !matches!(&**n, "Nat.add" | "Nat.mul") {
+        let library_fn = !matches!(&**n, "Nat.add" | "Nat.mul");
+        if (library_fn && !self.accel)
+            || args.len() != 2
+            || !matches!(
+                &**n,
+                "Nat.add" | "Nat.mul" | "nat_sub" | "nat_beq" | "nat_lt" | "nat_div" | "nat_rem"
+            )
+        {
+            return Ok(None);
+        }
+        // the library functions are accelerated only where they are the prelude's own
+        // (they are ordinary definitions; the kernel just computes their value directly)
+        if !matches!(&**n, "Nat.add" | "Nat.mul")
+            && !matches!(self.env.get(n), Some(Decl::Def { .. }))
+        {
             return Ok(None);
         }
         let a = self.whnf(&args[0])?;
@@ -475,12 +492,25 @@ impl<'a> TypeChecker<'a> {
         let (Term::Lit(x), Term::Lit(y)) = (&*a, &*b) else {
             return Ok(None);
         };
-        let r = if &**n == "Nat.add" {
-            x.checked_add(*y)
-        } else {
-            x.checked_mul(*y)
-        };
-        Ok(r.map(lit))
+        let (x, y) = (*x, *y);
+        let boolean = |v: bool| cnst(if v { "Bool.true" } else { "Bool.false" }.into(), vec![]);
+        Ok(Some(match &**n {
+            "Nat.add" => match x.checked_add(y) {
+                Some(r) => lit(r),
+                None => return Ok(None),
+            },
+            "Nat.mul" => match x.checked_mul(y) {
+                Some(r) => lit(r),
+                None => return Ok(None),
+            },
+            "nat_sub" => lit(x.saturating_sub(y)),
+            "nat_beq" => boolean(x == y),
+            "nat_lt" => boolean(x < y),
+            // division by zero is zero and `a % 0` is `a`, as the prelude defines them
+            "nat_div" => lit(x.checked_div(y).unwrap_or(0)),
+            "nat_rem" => lit(if y == 0 { x } else { x % y }),
+            _ => return Ok(None),
+        }))
     }
 
     /// ι-reduction: `I.rec ... (c fields)` ⟶ minor premise applied to the fields.

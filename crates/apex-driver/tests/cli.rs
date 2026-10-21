@@ -99,3 +99,69 @@ fn repl_remembers_declarations() {
     assert!(text.contains("49"), "{text}");
     assert!(text.contains("sq : Nat -> Nat"), "{text}");
 }
+
+/// The kernel computes `nat_sub`/`nat_div`/.. on literals directly; unfolding the library
+/// definitions must give the same values (a grid of small cases checked both ways).
+#[test]
+fn nat_acceleration_agrees_with_the_definitions() {
+    let dir = scratch("accel");
+    let mut src = String::new();
+    for a in 0..9u64 {
+        for b in 0..9u64 {
+            src += &format!(
+                "theorem s_{a}_{b}(): {a} - {b} = {} := by {{ rfl }}\n",
+                a.saturating_sub(b)
+            );
+            src += &format!(
+                "theorem d_{a}_{b}(): {a} / {b} = {} := by {{ rfl }}\n",
+                a.checked_div(b).unwrap_or(0)
+            );
+            src += &format!(
+                "theorem r_{a}_{b}(): {a} % {b} = {} := by {{ rfl }}\n",
+                if b == 0 { a } else { a % b }
+            );
+            src += &format!(
+                "theorem e_{a}_{b}(): nat_beq({a}, {b}) = {} := by {{ rfl }}\n",
+                a == b
+            );
+            src += &format!(
+                "theorem l_{a}_{b}(): nat_lt({a}, {b}) = {} := by {{ rfl }}\n",
+                a < b
+            );
+        }
+    }
+    let file = dir.join("grid.apex");
+    std::fs::write(&file, src).unwrap();
+    for no_accel in [false, true] {
+        let mut cmd = apex();
+        cmd.arg("check").arg(&file);
+        if no_accel {
+            cmd.env("APEX_NO_ACCEL", "1");
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "accel={}: {}",
+            !no_accel,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn verify_rechecks_everything_with_the_independent_verifier() {
+    let dir = scratch("verify");
+    let file = dir.join("v.apex");
+    std::fs::write(
+        &file,
+        "theorem t(a: Nat, b: Nat): (a + b) * (a + b) = a * a + 2 * a * b + b * b := by { ring }\n",
+    )
+    .unwrap();
+    let out = apex().arg("verify").arg(&file).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("verified:"));
+}

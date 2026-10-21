@@ -126,3 +126,9 @@ theorem add_comm(a: Nat, b: Nat): a + b = b + a := by {
 `cases h`, `induction h`는 `h : Even(n)`, `h : a = b`, `v : Vec<T, n>`처럼 인덱스가 있는 타입에도 쓴다. 인덱스가 변수면 모티브가 그 변수와 `h`를 함께 추상화한다
 (그 변수에 의존하는 가설은 되돌렸다가 각 경우에 다시 도입). 인덱스가 변수가 아니면(`h : Even(1)`) 새 변수 `idx_i`와 등식 `heq_i : idx_i = 1`로 일반화하고,
 각 경우에 `heq_i`가 가설로 남는다 (`Zero` 경우에는 `heq0 : 0 = 1`이므로 `omega`가 모순을 찾는다).
+
+## 9. conv, Int, 독립 검증
+
+`conv { lhs; arg 1; rw [h] }`: 이동 명령(`lhs rhs arg k enter [..] fun`)으로 하위 항 `s`를 고르고, 목표 `s = ?s'`를 일반 탭틱(`rw`/`simp`/`unfold`/`ring` …)으로 증명한 뒤 `Eq.subst`로 `s`를 `s'`로 바꾼다. `conv at h { .. }`는 가설 안에서.
+`omega`/`ring`은 `Int`도 푼다: 정수 원자마다 표현 `int_rep z p q`(`z = p - q`)를 얻어 문장을 `Nat` 문장으로 번역한다 (`intarith.rs`, 법칙은 `prelude_int.apex`에서 증명).
+`apex verify f.apex`는 모든 선언(라이브러리 포함)을 커널과 코드를 공유하지 않는 검증기로 다시 검사한다.

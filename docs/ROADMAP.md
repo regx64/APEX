@@ -12,7 +12,7 @@
 - [x] A-2 구조 η (필드 타입이 앞 필드에 의존하지 않는 구조체; 의존 구조체와 단위형 η는 아직)
 - [x] A-3 몫 `Quot` (mk/lift/ind/sound, lift 계산 규칙은 커널 whnf), 공리 `propext`/`Classical.choice`, `funext`는 Quot.sound에서 유도(공리 아님). 표면 문법 `forall(x: A) -> T` 추가
 - [x] A-4 인덱스 족: 표면 문법 `enum Even(n: Nat): Prop { Zero: Even(0), Add2<k: Nat>(Even(k)): Even(k + 2) }` / `enum Vec<T>(n: Nat) { .. }`, `induction`/`cases`가 인덱스를 추상화(변수가 아닌 인덱스는 등식 `heq_i`로 일반화). `match`(B-2)는 아직
-- [ ] A-5 `Nat`/`Int`/`String` 리터럴 가속(GMP급), 독립 검증기
+- [~] A-5 완료: 커널이 `nat_sub/nat_beq/nat_lt/nat_div/nat_rem`을 리터럴(u64)에서 직접 계산(`APEX_NO_ACCEL=1`로 끄고 정의 펼침과 격자 대조 테스트), 독립 검증기 크레이트 `apex-verify`(커널과 코드 공유 없음, `apex verify file.apex`; 귀납형·재귀자는 주어진 것으로 받고 타입만 검사, 곱셈수는 무시). 아직: 임의 정밀도(bignum), `String` 리터럴 가속
 
 ## B. 엘라보레이터
 - [x] B-1a 구조적 재귀의 일반화: 커널이 `T.below`/`T.brecOn`을 생성(인덱스 없는 단순 귀납형), 엘라보레이터는 직접 필드 재귀가 안 되면 brecOn 모드로 재시도 (`fib(m)+fib(m+1)`, 3단계 깊이, 리스트 두 칸 건너뛰기). 한계: 인덱스/상호/중첩/선형 필드 타입, 고차 재귀 필드는 brecOn이 없음
@@ -30,7 +30,7 @@
 - [x] D-1 `omega` (Nat 선형 산술, 검증된 증명서 검사기; Int·`/`·`%`·정수 타이트닝은 아직)
 - [x] D-2 `simp` 확장 (`at`, 조건부 재작성, `simp only`/`simp_arith`/`simp_all`; 합동 기반 재작성은 아직)
 - [~] D-3 `ring`(`Nat` 가환 반환, 반사적 증명: 정규화기와 건전성 증명이 `prelude_ring.apex`) 완료. `linarith`는 `omega`의 별칭, `Int`/체/`nlinarith`는 아직
-- [ ] D-4 `conv`
+- [x] D-4 `conv`: `conv [at h] { lhs; arg 2; enter [1,2]; fun; rw/simp/unfold/.. }` (앞쪽 이동 명령 뒤 하위 항에서 `s = ?s'`를 증명). 이동 명령을 섞어 쓰는 것과 `ext`/`intro`는 아직
 - [x] D-5 `auto`: 되돌리는 증명 탐색 (가설/`rfl`/`True`/모순/`intro`/`∧`·`∨` 분해와 선택/`simp`/`omega`/가설 분해/전방 추론/함의 적용; 깊이 6). `aesop`의 규칙 집합·우선순위·`simp_all` 통합은 없음
 
 ## E. 라이브러리

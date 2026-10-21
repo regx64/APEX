@@ -19,6 +19,7 @@ dependencies = [
  "apex-kernel",
  "apex-span",
  "apex-syntax",
+ "apex-verify",
 ]
 
 [[package]]
@@ -52,4 +53,11 @@ name = "apex-syntax"
 version = "0.0.1"
 dependencies = [
  "apex-span",
+]
+
+[[package]]
+name = "apex-verify"
+version = "0.0.1"
+dependencies = [
+ "apex-kernel",
 ]

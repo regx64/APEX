@@ -124,7 +124,151 @@ fn check_level_params(t: &T, lps: &[Name]) -> KResult<()> {
     }
 }
 
+/// Collect the constants a term mentions.
+fn consts_of(t: &T, out: &mut Vec<Name>) {
+    match &**t {
+        Term::Const(n, _) => out.push(n.clone()),
+        Term::App(f, a) => {
+            consts_of(f, out);
+            consts_of(a, out);
+        }
+        Term::Lam(_, ty, b) | Term::Pi(_, ty, b) => {
+            consts_of(ty, out);
+            consts_of(b, out);
+        }
+        Term::Let(_, ty, v, b) => {
+            consts_of(ty, out);
+            consts_of(v, out);
+            consts_of(b, out);
+        }
+        _ => {}
+    }
+}
+
 impl Env {
+    /// Write every declaration in dependency order, in the format the independent
+    /// verifier (`apex-verify`) reads: a table of declarations, then the term DAG.
+    pub fn export(&self) -> Vec<u8> {
+        use crate::ser::Writer;
+        fn var(out: &mut Vec<u8>, mut n: u64) {
+            loop {
+                let b = (n & 0x7f) as u8;
+                n >>= 7;
+                if n == 0 {
+                    out.push(b);
+                    return;
+                }
+                out.push(b | 0x80);
+            }
+        }
+        // dependency order: a declaration after every constant its terms and metadata mention
+        let mut names: Vec<&Name> = self.decls.keys().collect();
+        names.sort();
+        let mut order: Vec<Name> = Vec::new();
+        let mut state: HashMap<Name, bool> = HashMap::new();
+        fn visit(env: &Env, n: &Name, state: &mut HashMap<Name, bool>, order: &mut Vec<Name>) {
+            if state.contains_key(n) {
+                return;
+            }
+            state.insert(n.clone(), false);
+            let Some(d) = env.decls.get(n) else { return };
+            let mut deps = Vec::new();
+            consts_of(d.ty(), &mut deps);
+            match d {
+                Decl::Def { val, .. } => consts_of(val, &mut deps),
+                Decl::Inductive(i) => {
+                    deps.extend(i.family.iter().cloned());
+                }
+                Decl::Ctor(c) => deps.push(c.ind.clone()),
+                Decl::Rec(r) => {
+                    deps.push(r.ind.clone());
+                    for ru in &r.rules {
+                        consts_of(&ru.rhs, &mut deps);
+                        deps.push(ru.ctor.clone());
+                    }
+                }
+                Decl::Axiom { .. } => {}
+            }
+            for dep in deps {
+                if &dep != n {
+                    visit(env, &dep, state, order);
+                }
+            }
+            state.insert(n.clone(), true);
+            order.push(n.clone());
+        }
+        for n in names {
+            visit(self, n, &mut state, &mut order);
+        }
+        let mut w = Writer::new();
+        let mut meta = Vec::new();
+        var(&mut meta, order.len() as u64);
+        for n in &order {
+            let d = &self.decls[n];
+            let tag = match d {
+                Decl::Axiom { .. } => 0u8,
+                Decl::Def { .. } => 1,
+                Decl::Inductive(_) => 2,
+                Decl::Ctor(_) => 3,
+                Decl::Rec(_) => 4,
+            };
+            meta.push(tag);
+            var(&mut meta, w.intern(n) as u64);
+            let lps = d.lparams();
+            var(&mut meta, lps.len() as u64);
+            for l in lps {
+                var(&mut meta, w.intern(l) as u64);
+            }
+            var(&mut meta, w.term(d.ty()) as u64);
+            match d {
+                Decl::Axiom { .. } => {}
+                Decl::Def { val, height, .. } => {
+                    var(&mut meta, w.term(val) as u64);
+                    var(&mut meta, *height as u64);
+                }
+                Decl::Inductive(i) => {
+                    var(&mut meta, i.nparams as u64);
+                    var(&mut meta, i.nindices as u64);
+                    var(&mut meta, i.ctors.len() as u64);
+                    for c in &i.ctors {
+                        var(&mut meta, w.intern(c) as u64);
+                    }
+                    meta.push(i.is_prop as u8);
+                    var(&mut meta, w.intern(&i.rec) as u64);
+                    var(&mut meta, i.family.len() as u64);
+                    for f in &i.family {
+                        var(&mut meta, w.intern(f) as u64);
+                    }
+                }
+                Decl::Ctor(c) => {
+                    var(&mut meta, w.intern(&c.ind) as u64);
+                    var(&mut meta, c.idx as u64);
+                    var(&mut meta, c.nparams as u64);
+                    var(&mut meta, c.nfields as u64);
+                }
+                Decl::Rec(r) => {
+                    var(&mut meta, w.intern(&r.ind) as u64);
+                    var(&mut meta, r.nparams as u64);
+                    var(&mut meta, r.nindices as u64);
+                    var(&mut meta, r.nmotives as u64);
+                    var(&mut meta, r.nminors as u64);
+                    var(&mut meta, r.rules.len() as u64);
+                    for ru in &r.rules {
+                        var(&mut meta, w.intern(&ru.ctor) as u64);
+                        var(&mut meta, ru.nfields as u64);
+                        var(&mut meta, w.term(&ru.rhs) as u64);
+                    }
+                }
+            }
+        }
+        let blob = w.finish();
+        let mut out = b"APXV1".to_vec();
+        var(&mut out, meta.len() as u64);
+        out.extend_from_slice(&meta);
+        out.extend_from_slice(&blob);
+        out
+    }
+
     pub fn new() -> Env {
         Env::default()
     }

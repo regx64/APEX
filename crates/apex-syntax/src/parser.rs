@@ -93,6 +93,7 @@ const TACTIC_WORDS: &[&str] = &[
     "calc",
     "trivial",
     "ring",
+    "conv",
     "change",
     "try",
     "repeat",
@@ -534,6 +535,63 @@ impl Parser {
             "exists" => K::Exists(self.expr()?),
             "subst" => K::Subst(self.ident()?),
             "change" => K::Show(self.ty()?),
+            "conv" => {
+                let at = self.at_clause()?;
+                self.expect(&T::LBrace)?;
+                // leading navigation steps, then the tactics to run at the focus
+                let mut nav = Vec::new();
+                loop {
+                    while self.eat(&T::Semi) {}
+                    let word = match self.peek() {
+                        T::Ident(w) => w.clone(),
+                        _ => break,
+                    };
+                    match word.as_str() {
+                        "lhs" => nav.push(NavStep::Lhs),
+                        "rhs" => nav.push(NavStep::Rhs),
+                        "fun" => nav.push(NavStep::Fun),
+                        "arg" => {
+                            self.bump();
+                            match self.peek().clone() {
+                                T::Nat(n) => {
+                                    self.bump();
+                                    nav.push(NavStep::Arg(n as usize));
+                                }
+                                other => {
+                                    return self.err(format!("`arg` needs a number, found {other}"))
+                                }
+                            }
+                            continue;
+                        }
+                        "enter" => {
+                            self.bump();
+                            self.expect(&T::LBracket)?;
+                            while *self.peek() != T::RBracket {
+                                match self.peek().clone() {
+                                    T::Nat(n) => {
+                                        self.bump();
+                                        nav.push(NavStep::Arg(n as usize));
+                                    }
+                                    other => {
+                                        return self
+                                            .err(format!("`enter` needs numbers, found {other}"))
+                                    }
+                                }
+                                if !self.eat(&T::Comma) {
+                                    break;
+                                }
+                            }
+                            self.expect(&T::RBracket)?;
+                            continue;
+                        }
+                        _ => break,
+                    }
+                    self.bump();
+                }
+                let body = self.tactic_seq()?;
+                self.expect(&T::RBrace)?;
+                K::Conv(at, nav, body)
+            }
             "trivial" => K::Trivial,
             "ring" => K::Ring,
             "congr" => K::Congr,
