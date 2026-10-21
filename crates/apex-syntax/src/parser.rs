@@ -378,7 +378,8 @@ impl Parser {
         let generics = self.generics()?;
         let params = self.params()?;
         self.expect(&T::Colon)?;
-        let stmt = self.expr()?;
+        // type mode: statements such as `And<P, Q>` take generic arguments
+        let stmt = self.ty()?;
         self.expect(&T::ColonEq)?;
         let proof = if self.eat(&T::By) {
             self.expect(&T::LBrace)?;

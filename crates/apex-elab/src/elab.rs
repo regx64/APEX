@@ -382,6 +382,24 @@ impl Elaborator {
         masks.insert("Eq".into(), vec![Bk::Imp, Bk::Exp, Bk::Exp]);
         masks.insert("Eq.refl".into(), vec![Bk::Imp, Bk::Exp]);
         masks.insert("IO.pure".into(), vec![Bk::Imp, Bk::Exp]);
+        use Bk::{Exp, Imp};
+        for (n, m) in [
+            ("Eq.subst", vec![Imp, Imp, Imp, Exp, Exp, Exp]),
+            ("Eq.symm", vec![Imp, Imp, Imp, Exp]),
+            ("Eq.trans", vec![Imp, Imp, Imp, Imp, Exp, Exp]),
+            ("congr_arg", vec![Imp, Imp, Imp, Imp, Exp, Exp]),
+            ("False.elim", vec![Imp, Exp]),
+            ("Not", vec![Exp]),
+            ("And", vec![Exp, Exp]),
+            ("And.intro", vec![Imp, Imp, Exp, Exp]),
+            ("And.left", vec![Imp, Imp, Exp]),
+            ("And.right", vec![Imp, Imp, Exp]),
+            ("Or", vec![Exp, Exp]),
+            ("Or.inl", vec![Imp, Imp, Exp]),
+            ("Or.inr", vec![Imp, Imp, Exp]),
+        ] {
+            masks.insert(n.into(), m);
+        }
         masks.insert("List".into(), vec![Bk::Exp]);
         masks.insert("List.nil".into(), vec![Bk::Imp]);
         masks.insert("List.cons".into(), vec![Bk::Imp, Bk::Exp, Bk::Exp]);

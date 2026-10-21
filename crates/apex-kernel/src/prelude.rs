@@ -156,6 +156,7 @@ pub fn add_prelude(env: &mut Env) -> KResult<()> {
         ],
     })?;
     add_io(env)?;
+    add_logic(env)?;
     Ok(())
 }
 
@@ -193,5 +194,452 @@ fn add_io(env: &mut Env) -> KResult<()> {
         .build()?,
     )?;
     env.add_axiom("IO.print", &[], arrow(c("String"), io(c("Unit"))).build()?)?;
+    Ok(())
+}
+
+/// Propositional logic and the standard `Eq` lemmas. These are what the tactic
+/// framework builds proofs from; each is an ordinary kernel definition.
+fn add_logic(env: &mut Env) -> KResult<()> {
+    let u = Level::param("u");
+    let v_ = Level::param("v");
+    let z = Level::zero;
+    let eq = |l: &Level, t: Raw, a: Raw, b: Raw| app_(cl("Eq", vec![l.clone()]), vec![t, a, b]);
+
+    // Eq.subst {α a b} (motive : α → Prop) (h : a = b) (m : motive a) : motive b
+    env.add_def(
+        "Eq.subst",
+        &["u"],
+        pi_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            pi_(
+                "a",
+                v("α"),
+                pi_(
+                    "b",
+                    v("α"),
+                    pi_(
+                        "motive",
+                        arrow(v("α"), prop()),
+                        pi_(
+                            "h",
+                            eq(&u, v("α"), v("a"), v("b")),
+                            arrow(
+                                app_(v("motive"), vec![v("a")]),
+                                app_(v("motive"), vec![v("b")]),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+        lam_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            lam_(
+                "a",
+                v("α"),
+                lam_(
+                    "b",
+                    v("α"),
+                    lam_(
+                        "motive",
+                        arrow(v("α"), prop()),
+                        lam_(
+                            "h",
+                            eq(&u, v("α"), v("a"), v("b")),
+                            lam_(
+                                "m",
+                                app_(v("motive"), vec![v("a")]),
+                                app_(
+                                    cl("Eq.rec", vec![z(), u.clone()]),
+                                    vec![
+                                        v("α"),
+                                        v("a"),
+                                        lam_(
+                                            "x",
+                                            v("α"),
+                                            lam_(
+                                                "_",
+                                                eq(&u, v("α"), v("a"), v("x")),
+                                                app_(v("motive"), vec![v("x")]),
+                                            ),
+                                        ),
+                                        v("m"),
+                                        v("b"),
+                                        v("h"),
+                                    ],
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+    )?;
+
+    // Eq.symm {α a b} (h : a = b) : b = a
+    env.add_def(
+        "Eq.symm",
+        &["u"],
+        pi_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            pi_(
+                "a",
+                v("α"),
+                pi_(
+                    "b",
+                    v("α"),
+                    arrow(
+                        eq(&u, v("α"), v("a"), v("b")),
+                        eq(&u, v("α"), v("b"), v("a")),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+        lam_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            lam_(
+                "a",
+                v("α"),
+                lam_(
+                    "b",
+                    v("α"),
+                    lam_(
+                        "h",
+                        eq(&u, v("α"), v("a"), v("b")),
+                        app_(
+                            cl("Eq.subst", vec![u.clone()]),
+                            vec![
+                                v("α"),
+                                v("a"),
+                                v("b"),
+                                lam_("x", v("α"), eq(&u, v("α"), v("x"), v("a"))),
+                                v("h"),
+                                app_(cl("Eq.refl", vec![u.clone()]), vec![v("α"), v("a")]),
+                            ],
+                        ),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+    )?;
+
+    // Eq.trans {α a b c} (h₁ : a = b) (h₂ : b = c) : a = c
+    env.add_def(
+        "Eq.trans",
+        &["u"],
+        pi_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            pi_(
+                "a",
+                v("α"),
+                pi_(
+                    "b",
+                    v("α"),
+                    pi_(
+                        "c",
+                        v("α"),
+                        arrow(
+                            eq(&u, v("α"), v("a"), v("b")),
+                            arrow(
+                                eq(&u, v("α"), v("b"), v("c")),
+                                eq(&u, v("α"), v("a"), v("c")),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+        lam_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            lam_(
+                "a",
+                v("α"),
+                lam_(
+                    "b",
+                    v("α"),
+                    lam_(
+                        "c",
+                        v("α"),
+                        lam_(
+                            "h1",
+                            eq(&u, v("α"), v("a"), v("b")),
+                            lam_(
+                                "h2",
+                                eq(&u, v("α"), v("b"), v("c")),
+                                app_(
+                                    cl("Eq.subst", vec![u.clone()]),
+                                    vec![
+                                        v("α"),
+                                        v("b"),
+                                        v("c"),
+                                        lam_("x", v("α"), eq(&u, v("α"), v("a"), v("x"))),
+                                        v("h2"),
+                                        v("h1"),
+                                    ],
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+    )?;
+
+    // congr_arg {α β a b} (f : α → β) (h : a = b) : f a = f b
+    env.add_def(
+        "congr_arg",
+        &["u", "v"],
+        pi_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            pi_m(
+                Mult::Zero,
+                "β",
+                sort_(v_.clone()),
+                pi_(
+                    "a",
+                    v("α"),
+                    pi_(
+                        "b",
+                        v("α"),
+                        pi_(
+                            "f",
+                            arrow(v("α"), v("β")),
+                            arrow(
+                                eq(&u, v("α"), v("a"), v("b")),
+                                eq(
+                                    &v_,
+                                    v("β"),
+                                    app_(v("f"), vec![v("a")]),
+                                    app_(v("f"), vec![v("b")]),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+        lam_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            lam_m(
+                Mult::Zero,
+                "β",
+                sort_(v_.clone()),
+                lam_(
+                    "a",
+                    v("α"),
+                    lam_(
+                        "b",
+                        v("α"),
+                        lam_(
+                            "f",
+                            arrow(v("α"), v("β")),
+                            lam_(
+                                "h",
+                                eq(&u, v("α"), v("a"), v("b")),
+                                app_(
+                                    cl("Eq.subst", vec![u.clone()]),
+                                    vec![
+                                        v("α"),
+                                        v("a"),
+                                        v("b"),
+                                        lam_(
+                                            "x",
+                                            v("α"),
+                                            eq(
+                                                &v_,
+                                                v("β"),
+                                                app_(v("f"), vec![v("a")]),
+                                                app_(v("f"), vec![v("x")]),
+                                            ),
+                                        ),
+                                        v("h"),
+                                        app_(
+                                            cl("Eq.refl", vec![v_.clone()]),
+                                            vec![v("β"), app_(v("f"), vec![v("a")])],
+                                        ),
+                                    ],
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+    )?;
+
+    // inductive True : Prop | intro
+    env.add_inductive(InductiveDecl {
+        name: "True".into(),
+        lparams: vec![],
+        nparams: 0,
+        ty: prop().build()?,
+        ctors: vec![("True.intro".into(), c("True").build()?)],
+    })?;
+    // inductive False : Prop
+    env.add_inductive(InductiveDecl {
+        name: "False".into(),
+        lparams: vec![],
+        nparams: 0,
+        ty: prop().build()?,
+        ctors: vec![],
+    })?;
+    // False.elim {C : Sort u} (h : False) : C
+    env.add_def(
+        "False.elim",
+        &["u"],
+        pi_m(Mult::Zero, "C", sort_(u.clone()), arrow(c("False"), v("C"))).build()?,
+        lam_m(
+            Mult::Zero,
+            "C",
+            sort_(u.clone()),
+            lam_(
+                "h",
+                c("False"),
+                app_(
+                    cl("False.rec", vec![u.clone()]),
+                    vec![lam_("_", c("False"), v("C")), v("h")],
+                ),
+            ),
+        )
+        .build()?,
+    )?;
+    // def Not (p : Prop) : Prop := p → False
+    env.add_def(
+        "Not",
+        &[],
+        pi_m(Mult::Zero, "p", prop(), prop()).build()?,
+        lam_m(Mult::Zero, "p", prop(), arrow(v("p"), c("False"))).build()?,
+    )?;
+    // inductive And (a b : Prop) : Prop | intro (left : a) (right : b)
+    env.add_inductive(InductiveDecl {
+        name: "And".into(),
+        lparams: vec![],
+        nparams: 2,
+        ty: pi_m(
+            Mult::Zero,
+            "a",
+            prop(),
+            pi_m(Mult::Zero, "b", prop(), prop()),
+        )
+        .build()?,
+        ctors: vec![(
+            "And.intro".into(),
+            pi_m(
+                Mult::Zero,
+                "a",
+                prop(),
+                pi_m(
+                    Mult::Zero,
+                    "b",
+                    prop(),
+                    arrow(v("a"), arrow(v("b"), app_(c("And"), vec![v("a"), v("b")]))),
+                ),
+            )
+            .build()?,
+        )],
+    })?;
+    // inductive Or (a b : Prop) : Prop | inl (h : a) | inr (h : b)
+    let or_ctor = |side: bool| {
+        pi_m(
+            Mult::Zero,
+            "a",
+            prop(),
+            pi_m(
+                Mult::Zero,
+                "b",
+                prop(),
+                arrow(
+                    if side { v("a") } else { v("b") },
+                    app_(c("Or"), vec![v("a"), v("b")]),
+                ),
+            ),
+        )
+        .build()
+    };
+    env.add_inductive(InductiveDecl {
+        name: "Or".into(),
+        lparams: vec![],
+        nparams: 2,
+        ty: pi_m(
+            Mult::Zero,
+            "a",
+            prop(),
+            pi_m(Mult::Zero, "b", prop(), prop()),
+        )
+        .build()?,
+        ctors: vec![
+            ("Or.inl".into(), or_ctor(true)?),
+            ("Or.inr".into(), or_ctor(false)?),
+        ],
+    })?;
+    // And.left / And.right
+    for (name, left) in [("And.left", true), ("And.right", false)] {
+        let ab = || app_(c("And"), vec![v("a"), v("b")]);
+        let want = || if left { v("a") } else { v("b") };
+        env.add_def(
+            name,
+            &[],
+            pi_m(
+                Mult::Zero,
+                "a",
+                prop(),
+                pi_m(Mult::Zero, "b", prop(), arrow(ab(), want())),
+            )
+            .build()?,
+            lam_m(
+                Mult::Zero,
+                "a",
+                prop(),
+                lam_m(
+                    Mult::Zero,
+                    "b",
+                    prop(),
+                    lam_(
+                        "h",
+                        ab(),
+                        app_(
+                            cl("And.rec", vec![z()]),
+                            vec![
+                                v("a"),
+                                v("b"),
+                                lam_("_", ab(), want()),
+                                lam_(
+                                    "l",
+                                    v("a"),
+                                    lam_("r", v("b"), if left { v("l") } else { v("r") }),
+                                ),
+                                v("h"),
+                            ],
+                        ),
+                    ),
+                ),
+            )
+            .build()?,
+        )?;
+    }
     Ok(())
 }
