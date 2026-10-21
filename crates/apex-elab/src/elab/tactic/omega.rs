@@ -240,6 +240,31 @@ impl<'a> Cx<'a> {
         self.atom(&t, atoms)
     }
 
+    /// `v + c` or `c` for a `Nat` term made of one variable and literals; `None` otherwise.
+    pub(super) fn nat_lin(&mut self, t: &T) -> Option<(Option<u32>, u64)> {
+        let mut atoms = Vec::new();
+        let e = self.reify(t, &mut atoms);
+        fn go(e: &Ex, atoms: &[T]) -> Option<(Option<u32>, u64)> {
+            match e {
+                Ex::Const(n) => Some((None, *n)),
+                Ex::Atom(i) => match &*atoms[*i] {
+                    Term::FVar(v) => Some((Some(*v), 0)),
+                    _ => None,
+                },
+                Ex::Add(a, b) => {
+                    let (va, ca) = go(a, atoms)?;
+                    let (vb, cb) = go(b, atoms)?;
+                    match (va, vb) {
+                        (Some(_), Some(_)) => None,
+                        (v, None) | (None, v) => Some((v, ca + cb)),
+                    }
+                }
+                _ => None,
+            }
+        }
+        go(&e, &atoms)
+    }
+
     fn atom(&mut self, t: &T, atoms: &mut Vec<T>) -> Ex {
         match atoms.iter().position(|a| a == t) {
             Some(i) => Ex::Atom(i),
@@ -342,6 +367,9 @@ impl<'a> Cx<'a> {
         for (_, v) in &g.scope {
             if let Term::FVar(id) = &**v {
                 if let Ok(ty) = self.tc.local_ty(*id) {
+                    // instance calls (`a + b` as `Add.add Nat inst a b`) become `Nat.add a b`
+                    let ty = self.tc.zonk(&ty);
+                    let ty = self.devirt(&ty);
                     self.omega_facts(v, &ty, &mut atoms, &mut facts);
                 }
             }

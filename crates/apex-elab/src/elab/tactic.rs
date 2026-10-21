@@ -10,6 +10,7 @@
 use super::*;
 
 mod auto;
+mod imatch;
 mod omega;
 
 /// Options of `simp`.
@@ -2080,9 +2081,15 @@ impl<'a> Cx<'a> {
                 _ => return err(span, "internal error: malformed recursor type"),
             };
             let arm = arms.and_then(|a| a.iter().find(|a| a.ctor.name == ctor_short[i]));
-            let given: Vec<String> = arm
-                .map(|a| a.binders.iter().map(|b| b.name.clone()).collect())
-                .unwrap_or_default();
+            let given: Vec<String> = match arm {
+                Some(a) => a.binders.iter().map(|b| b.name.clone()).collect(),
+                // a dependent `match` names the binders of each case itself
+                None => self
+                    .case_names
+                    .as_ref()
+                    .and_then(|m| m.get(&ctor_short[i]).cloned())
+                    .unwrap_or_default(),
+            };
             let mut fvs = Vec::new();
             let mut cur = dom.clone();
             let mut scope: Vec<(String, T)> = g

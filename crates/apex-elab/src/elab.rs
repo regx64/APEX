@@ -699,6 +699,9 @@ impl Elaborator {
                             break 'search;
                         }
                         Err(e) => {
+                            if std::env::var_os("APEX_DEBUG").is_some() {
+                                eprintln!("[structural attempt deep={deep} k={k}] {}", e.msg);
+                            }
                             // the course-of-values attempt is the more capable one
                             if deep && k == 0 || first_err.is_none() {
                                 first_err = Some(e);
@@ -907,6 +910,10 @@ impl Elaborator {
     }
 
     fn elab_enum(&mut self, d: &EnumDecl, span: Span) -> R<()> {
+        if !d.indices.is_empty() {
+            // dependent `match` and index equations use the arithmetic library
+            self.load_omega();
+        }
         // `: Prop` makes an inductive predicate, otherwise a `Type`
         let level = match d.sort.as_ref().map(|e| &e.kind) {
             None => 1,
@@ -1518,6 +1525,8 @@ struct Cx<'a> {
     dep_if: bool,
     /// The call being unfolded by `simp` (so its recursive calls can be folded back).
     pending_call: T,
+    /// Binder names per constructor for the cases of a dependent `match`.
+    case_names: Option<HashMap<String, Vec<String>>>,
 }
 
 fn path_name(e: &Expr) -> Option<String> {
@@ -1552,6 +1561,7 @@ impl<'a> Cx<'a> {
             spans: HashMap::new(),
             dep_if: false,
             pending_call: lit(0),
+            case_names: None,
         }
     }
 
@@ -3210,6 +3220,16 @@ impl<'a> Cx<'a> {
                 )
             }
         };
+        if self.is_indexed(x) {
+            let r = self.elab_indexed_match(x, arms, &ret, span)?;
+            return Ok(match wrap {
+                None => r,
+                Some((ty, val)) => {
+                    let r = self.tc.zonk(&r);
+                    let_(Mult::Omega, ty, val, abstract_fvars(&r, &[x]))
+                }
+            });
+        }
         let mut rows = Vec::new();
         for a in arms {
             rows.push(Row {
@@ -3710,7 +3730,12 @@ impl<'a> Cx<'a> {
             .position(|&p| p == decr)
             .expect("decreasing parameter is explicit");
         let dty = from_kernel(self.tc.local_ty(decr), span)?;
-        let arg = self.elab_check(&args[k], &dty)?;
+        // a field of an indexed family has other indices than the parameter
+        let arg = if self.is_indexed(decr) {
+            self.elab(&args[k], None)?
+        } else {
+            self.elab_check(&args[k], &dty)?
+        };
         let arg = self.tc.zonk(&arg);
         let arg = self.canon_fields(&arg);
         let ih = self.rec.as_ref().and_then(|rc| match &*arg {
