@@ -127,6 +127,15 @@ static V *exec(int gid, V **args, int nargs) {
     memcpy(s, a->s, a->slen); memcpy(s + a->slen, b->s, b->slen); s[a->slen + b->slen] = 0;
     V *v = mk(T_STR); v->s = s; v->slen = a->slen + b->slen; return v;
   }
+  case P_STR_LENGTH: {
+    V *a = force_str(args[0]); u128 n = 0;
+    for (size_t i = 0; i < a->slen; i++) if (((unsigned char)a->s[i] & 0xC0) != 0x80) n++;
+    return mk_nat(n);
+  }
+  case P_STR_BEQ: {
+    V *a = force_str(args[0]), *b = force_str(args[1]);
+    return ctor0(a->slen == b->slen && !memcmp(a->s, b->s, a->slen) ? "Bool.true" : "Bool.false");
+  }
   case P_NAT_SUB: { u128 a = force_nat(args[0]), b = force_nat(args[1]); return mk_nat(a > b ? a - b : 0); }
   case P_NAT_DIV: { u128 a = force_nat(args[0]), b = force_nat(args[1]); return mk_nat(b ? a / b : 0); }
   case P_NAT_REM: { u128 a = force_nat(args[0]), b = force_nat(args[1]); return mk_nat(b ? a % b : a); }

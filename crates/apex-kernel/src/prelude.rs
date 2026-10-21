@@ -177,6 +177,12 @@ fn add_io(env: &mut Env) -> KResult<()> {
         arrow(c("String"), arrow(c("String"), c("String"))).build()?,
     )?;
     env.add_axiom("Nat.toString", &[], arrow(c("Nat"), c("String")).build()?)?;
+    env.add_axiom("String.length", &[], arrow(c("String"), c("Nat")).build()?)?;
+    env.add_axiom(
+        "String.beq",
+        &[],
+        arrow(c("String"), arrow(c("String"), c("Bool"))).build()?,
+    )?;
     env.add_axiom("IO", &[], arrow(type_(), type_()).build()?)?;
     env.add_axiom(
         "IO.pure",

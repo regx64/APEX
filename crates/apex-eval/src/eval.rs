@@ -243,6 +243,14 @@ impl<'a> Evaluator<'a> {
                     let (a, b) = (self.force_str(&args[0])?, self.force_str(&args[1])?);
                     Ok(Value::Str(format!("{a}{b}").into()))
                 }
+                "String.length" => {
+                    Ok(Value::Nat(self.force_str(&args[0])?.chars().count() as u128))
+                }
+                "String.beq" => {
+                    let (a, b) = (self.force_str(&args[0])?, self.force_str(&args[1])?);
+                    let name = if a == b { "Bool.true" } else { "Bool.false" };
+                    Ok(Value::Ctor(name.into(), Rc::new(vec![])))
+                }
                 "nat_sub" => {
                     let (a, b) = (self.force_nat(&args[0])?, self.force_nat(&args[1])?);
                     Ok(Value::Nat(a.saturating_sub(b)))
@@ -389,7 +397,8 @@ impl<'a> Evaluator<'a> {
             "Nat.mul" => fun(Kind::NatMul, 2),
             // native versions of prelude definitions (same behavior, faster)
             "nat_sub" | "nat_beq" | "nat_lt" | "nat_div" | "nat_rem" => fun(Kind::Prim, 2),
-            "String.append" => fun(Kind::Prim, 2),
+            "String.append" | "String.beq" => fun(Kind::Prim, 2),
+            "String.length" => fun(Kind::Prim, 1),
             "Nat.toString" => fun(Kind::Prim, 1),
             // quotients: `Quot.mk α r a` is `a`; `Quot.lift α r β f h q` is `f q`
             // well-founded recursion runs as a plain fixpoint:

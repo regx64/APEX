@@ -111,6 +111,7 @@ impl Div for Nat { fn div(self, other: Self) -> Self { nat_div(self, other) } }
 impl Rem for Nat { fn rem(self, other: Self) -> Self { nat_rem(self, other) } }
 impl BEq for Nat { fn beq(self, other: Self) -> Bool { nat_beq(self, other) } }
 impl Ord for Nat { fn lt(self, other: Self) -> Bool { nat_lt(self, other) } }
+impl BEq for String { fn beq(self, other: Self) -> Bool { String.beq(self, other) } }
 impl Add for String { fn add(self, other: Self) -> Self { String.append(self, other) } }
 
 impl BEq for Bool {

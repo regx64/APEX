@@ -34,7 +34,7 @@
 - [x] D-5 `auto`: 되돌리는 증명 탐색 (가설/`rfl`/`True`/모순/`intro`/`∧`·`∨` 분해와 선택/`simp`/`omega`/가설 분해/전방 추론/함의 적용; 깊이 6). `aesop`의 규칙 집합·우선순위·`simp_all` 통합은 없음
 
 ## E. 라이브러리
-- [~] E-1 core 라이브러리: `Nat` 순서·산술 정리(`prelude_omega.apex`, ~700줄)와 `List` 보조정리(`prelude_core.apex`: append/map/len/sum/reverse/range/filter), 모두 증명됨. 이름을 언급할 때만 로드. `Int`(prelude_int), `Option`(prelude_data), `Array`/`Map`(연관 리스트)는 prelude_std. `String` 연산과 해시 맵(진짜)은 아직
+- [~] E-1 core 라이브러리: `Nat` 순서·산술 정리(`prelude_omega.apex`, ~700줄)와 `List` 보조정리(`prelude_core.apex`: append/map/len/sum/reverse/range/filter), 모두 증명됨. 이름을 언급할 때만 로드. `Int`(prelude_int), `Option`(prelude_data), `Array`/`Map`(연관 리스트)는 prelude_std. `String.length`/`String.beq`(`==`) 추가. 더 많은 `String` 연산과 해시 맵(진짜)은 아직
 - [~] E-2 "Mathlib-lite": `prelude_math.apex`(약 150줄: 나눗셈, 짝/홀, 가우스·제곱합·홀수합 공식, 거듭제곱 법칙, n < 2^n, 피보나치 양수성, 소수 정의와 `prime_two`)와 `prelude_std.apex`(`Array`, `Map`, `nat_gcd`/`nat_pow`/`nat_min`/`nat_max`). 전부 증명됨. Mathlib 규모와는 거리가 멀다 (대수 구조 계층, 해석학, 조합론 등 없음)
 
 ## F. 도구와 런타임

@@ -17,6 +17,8 @@ const PRIMS: &[(&str, &str, usize)] = &[
     ("Nat.add", "P_NAT_ADD", 2),
     ("Nat.mul", "P_NAT_MUL", 2),
     ("String.append", "P_STR_APPEND", 2),
+    ("String.length", "P_STR_LENGTH", 1),
+    ("String.beq", "P_STR_BEQ", 2),
     ("nat_sub", "P_NAT_SUB", 2),
     ("nat_div", "P_NAT_DIV", 2),
     ("nat_rem", "P_NAT_REM", 2),
