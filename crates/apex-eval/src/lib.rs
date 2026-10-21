@@ -1,7 +1,10 @@
 //! Erasure and a lazy interpreter for checked APEX programs.
 
+mod compile;
 mod erase;
 mod eval;
+
+pub use compile::emit_c;
 
 pub use eval::Evaluator;
 

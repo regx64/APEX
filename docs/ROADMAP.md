@@ -38,7 +38,7 @@
 - [ ] E-2 Mathlib 규모 수학
 
 ## F. 도구와 런타임
-- [ ] F-1 네이티브 백엔드(M7)
+- [x] F-1 네이티브 백엔드: `apex compile f.apex -o out`이 지우기(erasure)된 IR 중 `main`이 닿는 것을 데이터로, 느긋한 환경 기계의 C 이식(`runtime.c`)과 함께 C로 내보내 `cc`로 빌드한다 (`tests/run/*.apex` 32개가 인터프리터와 같은 출력). 한계: 최적화하는 AOT가 아니라 같은 기계를 C로 옮긴 것, GC 없음(메모리를 해제하지 않음), `Nat`은 u128. Cranelift/LLVM 대신 C를 택함
 - [x] F-2 패키지/모듈: `apex.toml`, `import a.b;`(의존성 먼저 로드, 순환 검출), `apex new/build/run/test` (원격 레지스트리·버전 해석은 없음)
 - [x] F-3 REPL: `apex repl` (선언 누적, 식 평가, `:type NAME`). LSP는 아직
 - [x] F-4 문서 생성: `apex doc` (시그니처와 `///` 주석 → Markdown)

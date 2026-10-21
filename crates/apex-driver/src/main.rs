@@ -53,6 +53,7 @@ fn main() -> ExitCode {
                 Err((String::new(), apex_span::Span::default()))
             }
         }),
+        (Some("compile"), Some(path)) => run(path, |src| compile(path, src, &args)),
         (Some("run"), Some(path)) => run(path, |src| match apex_eval::run_source(path, src) {
             Ok(out) => {
                 print!("{out}");
@@ -88,6 +89,37 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// `apex compile file.apex [-o out]`: write C for the program and build it with `cc`.
+fn compile(path: &str, src: &str, args: &[String]) -> Result<(), (String, apex_span::Span)> {
+    let fail = |m: String| (m, apex_span::Span::default());
+    let el = apex_elab::check_source(path, src).map_err(|r| {
+        eprint!("{r}");
+        fail(String::new())
+    })?;
+    let c_src = apex_eval::emit_c(el.env()).map_err(fail)?;
+    let out = args
+        .iter()
+        .position(|a| a == "-o")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| path.trim_end_matches(".apex").to_string());
+    let c_path = format!("{out}.c");
+    std::fs::write(&c_path, c_src).map_err(|e| fail(format!("cannot write {c_path}: {e}")))?;
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+    let status = std::process::Command::new(&cc)
+        .args(["-O2", "-o", &out, &c_path, "-lpthread"])
+        .status()
+        .map_err(|e| fail(format!("cannot run `{cc}`: {e}")))?;
+    if !status.success() {
+        return Err(fail(format!("`{cc}` failed on {c_path}")));
+    }
+    if !args.iter().any(|a| a == "--keep-c") {
+        let _ = std::fs::remove_file(&c_path);
+    }
+    println!("compiled: {out}");
+    Ok(())
 }
 
 fn run(path: &str, f: impl FnOnce(&str) -> Result<(), (String, apex_span::Span)>) -> ExitCode {

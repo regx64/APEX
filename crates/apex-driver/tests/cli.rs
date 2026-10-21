@@ -165,3 +165,35 @@ fn verify_rechecks_everything_with_the_independent_verifier() {
     );
     assert!(String::from_utf8_lossy(&out.stdout).contains("verified:"));
 }
+
+#[test]
+fn compile_builds_a_native_executable_that_matches_the_interpreter() {
+    if Command::new("cc").arg("--version").output().is_err() {
+        return; // no C compiler on this machine
+    }
+    let dir = scratch("native");
+    let src = dir.join("p.apex");
+    std::fs::write(
+        &src,
+        "fn fib(n: Nat) -> Nat { match n { 0 => 0, 1 => 1, Nat.succ(Nat.succ(m)) => fib(m) + fib(m + 1) } }\n\
+         fn main() -> IO<Unit> { println(Nat.toString(fib(15))) }\n",
+    )
+    .unwrap();
+    let exe = dir.join("p");
+    let out = apex()
+        .arg("compile")
+        .arg(&src)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let native = Command::new(&exe).output().unwrap();
+    let interp = apex().arg("run").arg(&src).output().unwrap();
+    assert_eq!(native.stdout, interp.stdout);
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "610\n");
+}
