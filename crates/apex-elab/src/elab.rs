@@ -488,6 +488,25 @@ impl Elaborator {
         });
     }
 
+    /// Load classical logic (`em`, `by_contradiction`); `by_cases` and `by_contra` need it.
+    pub fn load_classical(&mut self) {
+        if self.env.get("em").is_some() {
+            return;
+        }
+        let src = include_str!("prelude_classical.apex");
+        let module = apex_syntax::parse(src).expect("classical prelude must parse");
+        self.prelude_loaded = false;
+        let result = self.elab_module(&module);
+        self.prelude_loaded = true;
+        result.unwrap_or_else(|e| {
+            let (line, _) = e.span.line_col(src);
+            panic!(
+                "classical prelude must elaborate: {} (prelude_classical.apex line {line})",
+                e.msg
+            )
+        });
+    }
+
     /// Load the libraries a program refers to. They are loaded on demand because they
     /// cost startup time: `omega` and well-founded recursion need the arithmetic
     /// library; naming one of the list lemmas loads the core library (which needs it too).
@@ -517,6 +536,14 @@ impl Elaborator {
                     .collect()
             })
             .unwrap_or_default();
+        if mentions("em")
+            || mentions("by_contradiction")
+            || mentions("not_not")
+            || src.contains("by_cases")
+            || src.contains("by_contra")
+        {
+            self.load_classical();
+        }
         if core_names.iter().any(|n| mentions(n)) {
             self.load_omega();
             self.load_core();
@@ -525,6 +552,7 @@ impl Elaborator {
             .any(|w| src.contains(w))
             || mentions("le")
             || mentions("lt")
+            || ["<=", ">=", "!=", "<->"].iter().any(|op| src.contains(op))
         {
             self.load_omega();
         }
@@ -1154,18 +1182,32 @@ impl Elaborator {
         let (ty, val, extra) = {
             let mut cx = self.cx();
             let tele = mk_tele(&mut cx)?;
-            let fty = tele.field_tys[j].clone();
-            if tele.fields[..j].iter().any(|&f| contains_fvar(&fty, f)) {
-                return err(
-                    fname.span,
-                    "fields that depend on earlier fields are not supported yet",
-                );
-            }
+            let fty0 = tele.field_tys[j].clone();
             let self_ty = mk_apps(&cnst(ind.into(), vec![]), &tele.pargs());
             let s = cx.tc.fresh("self", self_ty.clone(), Mult::Omega);
-            let lvl = from_kernel(cx.tc.check_is_type(&fty), fname.span)?;
             let t0 = cx.tc.fresh("t", self_ty, Mult::Omega);
-            let motive = cx.tc.mk_lam(&[t0], &fty);
+            // a field type may mention earlier fields: through their projections
+            let with_proj = |cx: &Cx<'_>, who: u32| -> T {
+                let _ = cx;
+                let mut t = fty0.clone();
+                for (k, &fk) in tele.fields[..j].iter().enumerate() {
+                    if contains_fvar(&t, fk) {
+                        let pk = mk_apps(
+                            &cnst(
+                                format!("{ind}.{}", tele.field_names[k]).as_str().into(),
+                                vec![],
+                            ),
+                            &[tele.pargs(), vec![fvar(who)]].concat(),
+                        );
+                        t = instantiate(&abstract_fvars(&t, &[fk]), &pk);
+                    }
+                }
+                t
+            };
+            let fty = with_proj(&cx, s);
+            let fty_motive = with_proj(&cx, t0);
+            let lvl = from_kernel(cx.tc.check_is_type(&fty), fname.span)?;
+            let motive = cx.tc.mk_lam(&[t0], &fty_motive);
             let minor = cx.tc.mk_lam(&tele.fields, &fvar(tele.fields[j]));
             let rec = cnst(format!("{ind}.rec").as_str().into(), vec![lvl]);
             let mut args = tele.pargs();
@@ -1567,6 +1609,7 @@ struct StructTele {
     params: Vec<u32>,
     fields: Vec<u32>,
     field_tys: Vec<T>,
+    field_names: Vec<String>,
     /// Binder kinds of each field's own leading generics (trait methods only).
     field_masks: Vec<Vec<Bk>>,
 }
@@ -1749,6 +1792,9 @@ impl<'a> Cx<'a> {
         let mut field_tys = Vec::new();
         for f in &d.fields {
             let ty = self.elab_type(&f.ty)?;
+            self.solve_goals(true)?;
+            self.tc.zonk_locals();
+            let ty = self.tc.zonk(&ty);
             let id = self.tc.fresh(&f.name.name, ty.clone(), Mult::Omega);
             self.scope.push((f.name.name.clone(), fvar(id)));
             fields.push(id);
@@ -1758,6 +1804,7 @@ impl<'a> Cx<'a> {
             params,
             fields,
             field_tys,
+            field_names: d.fields.iter().map(|f| f.name.name.clone()).collect(),
             field_masks: vec![],
         })
     }
@@ -2301,6 +2348,7 @@ impl<'a> Cx<'a> {
             params,
             fields,
             field_tys,
+            field_names: d.fns.iter().map(|m| m.name.name.clone()).collect(),
             field_masks,
         })
     }

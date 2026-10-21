@@ -18,6 +18,9 @@ pub struct TypeChecker<'a> {
     /// Metavariable state. Only the elaborator creates metavariables; a fresh
     /// checker (as used for the final kernel check) rejects any `MVar`.
     mvar_types: HashMap<u32, T>,
+    /// The local-variable counter when each metavariable was created: it may mention
+    /// exactly the locals with smaller ids.
+    mvar_born: HashMap<u32, u32>,
     mvar_assign: HashMap<u32, T>,
     level_assign: HashMap<u32, Level>,
     next_mvar: u32,
@@ -36,6 +39,7 @@ impl<'a> TypeChecker<'a> {
             lctx: HashMap::new(),
             next: 0,
             mvar_types: HashMap::new(),
+            mvar_born: HashMap::new(),
             mvar_assign: HashMap::new(),
             level_assign: HashMap::new(),
             next_mvar: 0,
@@ -48,6 +52,7 @@ impl<'a> TypeChecker<'a> {
         let id = self.next_mvar;
         self.next_mvar += 1;
         self.mvar_types.insert(id, ty);
+        self.mvar_born.insert(id, self.next);
         mvar(id)
     }
 
@@ -182,6 +187,29 @@ impl<'a> TypeChecker<'a> {
             let val = if fvs.is_empty() {
                 rhs
             } else {
+                // a metavariable inside `rhs` may later be solved by a term that mentions
+                // the variables being abstracted: it becomes a function of them
+                let mut open = Vec::new();
+                collect_mvars(&rhs, &mut open);
+                open.retain(|i| *i != m && !self.mvar_assign.contains_key(i));
+                for i in open {
+                    let born = self.mvar_born.get(&i).copied().unwrap_or(0);
+                    let inside: Vec<u32> = fvs.iter().copied().filter(|&f| f < born).collect();
+                    if inside.is_empty() {
+                        continue;
+                    }
+                    let ty = self.zonk(&self.mvar_types[&i].clone());
+                    let pty = self.mk_pi(&inside, &ty);
+                    let nm = self.new_mvar(pty);
+                    if let Term::MVar(n) = &*nm {
+                        let b = inside.iter().copied().min().unwrap_or(0);
+                        self.mvar_born.insert(*n, b);
+                    }
+                    let applied =
+                        mk_apps(&nm, &inside.iter().map(|&f| fvar(f)).collect::<Vec<_>>());
+                    self.mvar_assign.insert(i, applied);
+                }
+                let rhs = self.zonk(&rhs);
                 self.mk_lam(&fvs, &rhs)
             };
             self.mvar_assign.insert(m, val);
@@ -243,10 +271,18 @@ impl<'a> TypeChecker<'a> {
 
     /// Close `body` over `fvars` (outermost first), producing nested Π or λ.
     pub fn mk_binding(&self, fvars: &[u32], body: &T, is_pi: bool) -> T {
-        let mut r = abstract_fvars(body, fvars);
+        // metavariables assigned by now may mention the variables being abstracted
+        let zonked = |t: &T| {
+            if first_mvar(t).is_some() {
+                self.zonk(t)
+            } else {
+                t.clone()
+            }
+        };
+        let mut r = abstract_fvars(&zonked(body), fvars);
         for i in (0..fvars.len()).rev() {
             let l = &self.lctx[&fvars[i]];
-            let ty = abstract_fvars(&l.ty, &fvars[..i]);
+            let ty = abstract_fvars(&zonked(&l.ty), &fvars[..i]);
             r = if is_pi {
                 pi(l.mult, ty, r)
             } else {
@@ -892,5 +928,29 @@ fn lit_to_ctor(n: u64) -> T {
         cnst("Nat.zero".into(), vec![])
     } else {
         app(cnst("Nat.succ".into(), vec![]), lit(n - 1))
+    }
+}
+
+fn collect_mvars(t: &T, out: &mut Vec<u32>) {
+    match &**t {
+        Term::MVar(i) => {
+            if !out.contains(i) {
+                out.push(*i)
+            }
+        }
+        Term::App(f, a) => {
+            collect_mvars(f, out);
+            collect_mvars(a, out);
+        }
+        Term::Lam(_, ty, b) | Term::Pi(_, ty, b) => {
+            collect_mvars(ty, out);
+            collect_mvars(b, out);
+        }
+        Term::Let(_, ty, v, b) => {
+            collect_mvars(ty, out);
+            collect_mvars(v, out);
+            collect_mvars(b, out);
+        }
+        _ => {}
     }
 }

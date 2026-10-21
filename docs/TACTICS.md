@@ -28,7 +28,9 @@ theorem add_comm(a: Nat, b: Nat): a + b = b + a := by {
 
 탭틱은 `;`나 공백으로 구분한다. `{ ... }`는 첫 목표를 **반드시 닫는** 블록이다.
 `#[simp]`를 정리 앞에 붙이면 `simp`의 기본 규칙이 된다 (`#[simp] theorem zero_add(n: Nat): 0 + n = n := ...`).
-명제는 `a = b`, `And<P, Q>`, `Or<P, Q>`, `Not<P>`, `True`, `False`, `P -> Q`로 쓴다.
+명제는 `a = b`, `And<P, Q>`/`P /\ Q`, `Or<P, Q>`/`P \/ Q`, `Not<P>`, `P <-> Q`, `True`, `False`, `P -> Q`,
+`a <= b`, `a >= b`, `a != b`(`Nat`), `exists(x: A) -> P`, `forall(x: A) -> P`로 쓴다.
+(내장 연산자의 결합력: `<->` < `->` < `\/` < `/\` < `=`·`<=` < `+` < `*` < 단항.)
 
 | 탭틱 | 하는 일 |
 |---|---|
@@ -56,6 +58,20 @@ theorem add_comm(a: Nat, b: Nat): a + b = b + a := by {
 | `exists w` | `Exists(p)`를 증인 `w`로 증명 (뒤에 `rfl` 시도) |
 | `auto` | 되돌리는 증명 탐색: 가설·`rfl`·모순·`intro`·`∧`/`∨`/`∃` 가설 분해·목표 `∧` 분해와 `∨` 선택·`simp`·`omega`·전방 추론·함의 적용 (깊이 6) |
 | `decide` | 닫힌 명제(`=`, `And`, `Or`, `True`)를 계산으로 증명, 거짓이면 오류 |
+| `injection h with a b` | `h : C as = C bs`에서 필드 등식 `a_i = b_i` (앞 필드에 의존하는 필드는 제외). 생성자가 다르면 목표를 모순으로 닫는다 |
+| `contradiction` | 위에 더해 `C1 .. = C2 ..` 형태의 가설(서로 다른 생성자)도 모순으로 인정 — 판별 함수 `match x { C1 .. => True, _ => False }`를 만들어 `Eq.subst`로 옮긴다 (`noConfusion` 없이) |
+| `subst h` / `subst x` | 한쪽이 변수인 등식으로 그 변수를 소거 |
+| `rcases e with pat` / `obtain pat := e` | 패턴으로 분해: `(a, b)`(필드, 중첩은 평탄화), `p \| q`(생성자마다), `_`, 이름, `rfl`(= `subst`) |
+| `rintro pat ..` | `intro` 후 `rcases` |
+| `by_cases h : P` | 고전 논리로 `P`와 `¬P`로 나눈다 (`em`을 `Classical.choice`+`propext`+`funext`로 증명한 `prelude_classical.apex`를 로드) |
+| `by_contra h` | 목표의 부정을 가정하고 `False`를 증명 |
+| `specialize h(a, b)` | `h`를 인스턴스로 바꾼다 |
+| `refine e` | `exact` + `_` 구멍이 새 목표가 된다 |
+| `funext x` | `f = g`를 `f x = g x`로 |
+| `congr` | `f a = f b`를 `a = b`로 (`congr_arg` 연쇄) |
+| `calc { a = b := p; _ <= c := q }` | 등식/`<=`/`lt` 연쇄 (`Eq.trans`/`le_trans`/`lt_of_lt_of_le` …). 단계 증명은 항 또는 `by { .. }` |
+| `trivial` | `rfl`/`assumption`/`True.intro`/`decide`/`omega`/`simp` 중 되는 것 |
+| `change T` | `show T`의 별칭 |
 
 `with { .. }`를 생략하면 새 목표들이 순서대로 남는다 (자동 이름 `x1`, `ih`), 각각 `{ .. }` 블록으로 닫는다.
 오류는 실패한 탭틱의 위치와 **그 시점의 목표**(`case`, 가설, `⊢ 목표`)를 보여 준다.

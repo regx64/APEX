@@ -25,6 +25,10 @@ theorem add_right_cancel(a: Nat, b: Nat, c: Nat, h: a + c = b + c): a = b := by 
 }
 fn le(a: Nat, b: Nat) -> Prop { Exists(|k: Nat| a + k = b) }
 fn lt(a: Nat, b: Nat) -> Prop { le(Nat.succ(a), b) }
+fn ge(a: Nat, b: Nat) -> Prop { le(b, a) }
+fn gt(a: Nat, b: Nat) -> Prop { lt(b, a) }
+fn ne<A>(a: A, b: A) -> Prop { a = b -> False }
+fn Iff(p: Prop, q: Prop) -> Prop { And(p -> q, q -> p) }
 
 fn bool_is_true(b: Bool) -> Prop { match b { true => True, false => False } }
 fn nat_is_succ_p(n: Nat) -> Prop { match n { 0 => False, Nat.succ(_) => True } }
@@ -615,3 +619,9 @@ theorem beq_of_pos(b: Nat, h: lt(0, b)): nat_beq(b, 0) = false := by {
         succ(m) => { rfl },
     }
 }
+
+// order lemmas used by `calc`
+theorem lt_trans(a: Nat, b: Nat, c: Nat, h1: lt(a, b), h2: lt(b, c)): lt(a, c) := by { omega }
+theorem lt_of_lt_of_le(a: Nat, b: Nat, c: Nat, h1: lt(a, b), h2: le(b, c)): lt(a, c) := by { omega }
+theorem lt_of_le_of_lt(a: Nat, b: Nat, c: Nat, h1: le(a, b), h2: lt(b, c)): lt(a, c) := by { omega }
+theorem le_of_lt(a: Nat, b: Nat, h: lt(a, b)): le(a, b) := by { omega }

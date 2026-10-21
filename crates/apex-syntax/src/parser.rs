@@ -79,6 +79,19 @@ const TACTIC_WORDS: &[&str] = &[
     "cases",
     "revert",
     "injection",
+    "subst",
+    "rcases",
+    "obtain",
+    "rintro",
+    "by_cases",
+    "by_contra",
+    "specialize",
+    "refine",
+    "funext",
+    "congr",
+    "calc",
+    "trivial",
+    "change",
     "try",
     "repeat",
     "first",
@@ -99,6 +112,19 @@ struct Parser {
     ty_mode: bool,
     /// Operators and macros declared so far.
     nt: Notations,
+}
+
+/// The operators every file has: binding power, right associativity, function.
+fn builtin_infix(op: &str) -> Option<(u8, bool, &'static str)> {
+    Some(match op {
+        "<->" => (2, true, "Iff"),
+        "\\/" => (8, true, "Or"),
+        "/\\" => (10, true, "And"),
+        "<=" => (12, false, "le"),
+        ">=" => (12, false, "ge"),
+        "!=" => (12, false, "ne"),
+        _ => return None,
+    })
 }
 
 enum Infix {
@@ -486,6 +512,82 @@ impl Parser {
                 K::Revert(names)
             }
             "exists" => K::Exists(self.expr()?),
+            "subst" => K::Subst(self.ident()?),
+            "change" => K::Show(self.ty()?),
+            "trivial" => K::Trivial,
+            "congr" => K::Congr,
+            "refine" => K::Refine(self.expr()?),
+            "specialize" => K::Specialize(self.expr()?),
+            "funext" => K::Funext(self.binder_names()?),
+            "by_contra" => K::ByContra(match self.peek() {
+                T::Ident(w) if !TACTIC_WORDS.contains(&w.as_str()) => Some(self.ident()?),
+                _ => None,
+            }),
+            "by_cases" => {
+                // `by_cases h : P` or `by_cases P`
+                let named = matches!(self.peek(), T::Ident(_))
+                    && self
+                        .toks
+                        .get(self.pos + 1)
+                        .is_some_and(|t| t.kind == T::Colon);
+                let name = if named {
+                    let n = self.ident()?;
+                    self.expect(&T::Colon)?;
+                    Some(n)
+                } else {
+                    None
+                };
+                K::ByCases(name, self.ty()?)
+            }
+            "rcases" => {
+                let e = self.expr()?;
+                match self.peek() {
+                    T::Ident(w) if w == "with" => {
+                        self.bump();
+                    }
+                    other => return self.err(format!("expected `with`, found {other}")),
+                }
+                K::Rcases(e, self.rpat_alt()?)
+            }
+            "obtain" => {
+                let pat = self.rpat_alt()?;
+                self.expect(&T::ColonEq)?;
+                K::Rcases(self.expr()?, pat)
+            }
+            "rintro" => {
+                let mut pats = Vec::new();
+                while matches!(self.peek(), T::Underscore | T::LParen)
+                    || matches!(self.peek(), T::Ident(w) if !TACTIC_WORDS.contains(&w.as_str()))
+                {
+                    pats.push(self.rpat_atom()?);
+                }
+                if pats.is_empty() {
+                    return self.err("`rintro` needs at least one pattern");
+                }
+                K::Rintro(pats)
+            }
+            "calc" => {
+                self.expect(&T::LBrace)?;
+                let mut steps = Vec::new();
+                while *self.peek() != T::RBrace {
+                    let rel = self.expr()?;
+                    self.expect(&T::ColonEq)?;
+                    let proof = if self.eat(&T::By) {
+                        HaveProof::Tactic(self.tactic_block()?)
+                    } else {
+                        HaveProof::Term(self.expr()?)
+                    };
+                    steps.push(CalcStep { rel, proof });
+                    if !self.eat(&T::Semi) && !self.eat(&T::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&T::RBrace)?;
+                if steps.is_empty() {
+                    return self.err("`calc` needs at least one step");
+                }
+                K::Calc(steps)
+            }
             "injection" => {
                 let h = self.expr()?;
                 let names = if matches!(self.peek(), T::Ident(w) if w == "with") {
@@ -506,6 +608,45 @@ impl Parser {
             kind,
             span: start.to(self.prev_span()),
         })
+    }
+
+    fn rpat_alt(&mut self) -> PResult<RPat> {
+        let first = self.rpat_atom()?;
+        if *self.peek() != T::Bar {
+            return Ok(first);
+        }
+        let mut alts = vec![first];
+        while self.eat(&T::Bar) {
+            alts.push(self.rpat_atom()?);
+        }
+        Ok(RPat::Alt(alts))
+    }
+
+    fn rpat_atom(&mut self) -> PResult<RPat> {
+        match self.peek().clone() {
+            T::Underscore => {
+                self.bump();
+                Ok(RPat::Wild)
+            }
+            T::Ident(n) if !TACTIC_WORDS.contains(&n.as_str()) => {
+                self.bump();
+                Ok(RPat::Name(n))
+            }
+            T::LParen => {
+                self.bump();
+                let mut items = vec![self.rpat_alt()?];
+                while self.eat(&T::Comma) {
+                    items.push(self.rpat_alt()?);
+                }
+                self.expect(&T::RParen)?;
+                Ok(if items.len() == 1 {
+                    items.pop().expect("one item")
+                } else {
+                    RPat::Tuple(items)
+                })
+            }
+            other => self.err(format!("expected a pattern, found {other}")),
+        }
     }
 
     fn ident(&mut self) -> PResult<Ident> {
@@ -627,11 +768,14 @@ impl Parser {
                     self.eat(&T::Semi);
                     // Lean-style precedence numbers (`=` 50, `+` 65, `*` 70) to our binding powers
                     let lbp = match prec {
-                        0..=50 => 4,
-                        51..=65 => 6,
-                        66..=70 => 8,
-                        71..=80 => 10,
-                        _ => 12,
+                        0..=20 => 2,
+                        21..=25 => 4,
+                        26..=30 => 8,
+                        31..=35 => 10,
+                        36..=50 => 12,
+                        51..=65 => 14,
+                        66..=70 => 16,
+                        _ => 18,
                     };
                     if w == "prefix" {
                         self.nt.prefix.insert(op.clone(), (lbp, func));
@@ -1160,22 +1304,25 @@ impl Parser {
 
     fn infix(&self) -> Option<(u8, u8, Infix)> {
         Some(match self.peek() {
-            T::Arrow => (2, 1, Infix::Arrow),
-            T::Eq => (4, 5, Infix::Bin(BinOp::Eq)),
-            T::EqEq => (4, 5, Infix::Bin(BinOp::EqEq)),
-            T::Lt if !self.ty_mode => (4, 5, Infix::Bin(BinOp::Lt)),
-            T::Gt if !self.ty_mode => (4, 5, Infix::Bin(BinOp::Gt)),
-            T::Plus => (6, 7, Infix::Bin(BinOp::Add)),
-            T::Minus => (6, 7, Infix::Bin(BinOp::Sub)),
-            T::Star => (8, 9, Infix::Bin(BinOp::Mul)),
-            T::Slash => (8, 9, Infix::Bin(BinOp::Div)),
-            T::Percent => (8, 9, Infix::Bin(BinOp::Rem)),
+            T::Arrow => (4, 4, Infix::Arrow),
+            T::Eq => (12, 13, Infix::Bin(BinOp::Eq)),
+            T::EqEq => (12, 13, Infix::Bin(BinOp::EqEq)),
+            T::Lt if !self.ty_mode => (12, 13, Infix::Bin(BinOp::Lt)),
+            T::Gt if !self.ty_mode => (12, 13, Infix::Bin(BinOp::Gt)),
+            T::Plus => (14, 15, Infix::Bin(BinOp::Add)),
+            T::Minus => (14, 15, Infix::Bin(BinOp::Sub)),
+            T::Star => (16, 17, Infix::Bin(BinOp::Mul)),
+            T::Slash => (16, 17, Infix::Bin(BinOp::Div)),
+            T::Percent => (16, 17, Infix::Bin(BinOp::Rem)),
             T::Op(o) => {
-                let (lbp, right, f) = self.nt.infix.get(o)?;
+                let (lbp, right, f) = match self.nt.infix.get(o) {
+                    Some(d) => (d.0, d.1, d.2.as_str()),
+                    None => builtin_infix(o)?,
+                };
                 (
-                    *lbp,
-                    if *right { *lbp } else { lbp + 1 },
-                    Infix::Custom(f.clone()),
+                    lbp,
+                    if right { lbp } else { lbp + 1 },
+                    Infix::Custom(f.to_string()),
                 )
             }
             _ => return None,
@@ -1252,7 +1399,7 @@ impl Parser {
             }
             T::Star => {
                 self.bump();
-                let inner = self.expr_bp(10)?;
+                let inner = self.expr_bp(18)?;
                 Ok(Expr {
                     span: start.to(inner.span),
                     kind: ExprKind::Deref(Box::new(inner)),
@@ -1260,7 +1407,7 @@ impl Parser {
             }
             T::Minus => {
                 self.bump();
-                let inner = self.expr_bp(10)?;
+                let inner = self.expr_bp(18)?;
                 Ok(Expr {
                     span: start.to(inner.span),
                     kind: ExprKind::Neg(Box::new(inner)),
@@ -1276,7 +1423,7 @@ impl Parser {
                     _ => None,
                 };
                 let mutable = self.eat(&T::Mut);
-                let inner = self.expr_bp(10)?;
+                let inner = self.expr_bp(18)?;
                 Ok(Expr {
                     span: start.to(inner.span),
                     kind: ExprKind::Ref {
@@ -1371,7 +1518,7 @@ impl Parser {
                 ExprKind::Wild
             }
             T::Ident(name)
-                if name == "forall"
+                if (name == "forall" || name == "exists")
                     && self
                         .toks
                         .get(self.pos + 1)
@@ -1392,6 +1539,37 @@ impl Parser {
                 self.expect(&T::RParen)?;
                 self.expect(&T::Arrow)?;
                 let body = self.ty()?;
+                if name == "exists" {
+                    // `exists(x: A, y: B) -> P` is `Exists(|x: A| Exists(|y: B| P))`
+                    let mut acc = body;
+                    for (n, ty) in binders.into_iter().rev() {
+                        let sp = n.span.to(acc.span);
+                        let lamb = Expr {
+                            kind: ExprKind::Lambda {
+                                params: vec![LamParam {
+                                    name: n,
+                                    ty: Some(ty),
+                                }],
+                                body: Box::new(acc),
+                            },
+                            span: sp,
+                        };
+                        acc = Expr {
+                            kind: ExprKind::Call(
+                                Box::new(Expr {
+                                    kind: ExprKind::Var("Exists".into()),
+                                    span: sp,
+                                }),
+                                vec![lamb],
+                            ),
+                            span: sp,
+                        };
+                    }
+                    return Ok(Expr {
+                        kind: acc.kind,
+                        span: start.to(acc.span),
+                    });
+                }
                 ExprKind::Forall(binders, Box::new(body))
             }
             T::Ident(name) => {

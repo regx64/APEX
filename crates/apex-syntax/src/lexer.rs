@@ -102,10 +102,13 @@ fn keyword(s: &str) -> Option<TokenKind> {
     })
 }
 
+/// Operators that are always available (see `builtin_infix` in the parser).
+pub const BUILTIN_OPS: &[&str] = &["<->", "<=", ">=", "!=", "/\\", "\\/"];
+
 /// Tokenize `src`. The result always ends with an `Eof` token.
 /// The operators a file declares with `infixl`/`infixr`/`infix`/`prefix` (longest first).
 fn declared_ops(src: &str) -> Vec<String> {
-    let mut ops = Vec::new();
+    let mut ops: Vec<String> = BUILTIN_OPS.iter().map(|o| o.to_string()).collect();
     for line in src.lines() {
         let t = line.trim_start();
         let Some(rest) = ["infixl ", "infixr ", "infix ", "prefix "]

@@ -297,6 +297,25 @@ pub struct CaseArm {
     pub body: Vec<Tactic>,
 }
 
+/// A destructuring pattern of `rcases` / `obtain` / `rintro`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RPat {
+    /// Name the hypothesis (`rfl` substitutes an equation instead).
+    Name(String),
+    Wild,
+    /// `(p1, p2, ..)`: the fields of a one-constructor type (`And`, `Exists`, structures).
+    Tuple(Vec<RPat>),
+    /// `p1 | p2`: one pattern per constructor (`Or`).
+    Alt(Vec<RPat>),
+}
+
+/// One step `a = b := proof` of a `calc` chain (`_` stands for the previous right side).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CalcStep {
+    pub rel: Expr,
+    pub proof: HaveProof,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TacticKind {
     Intro(Vec<Ident>),
@@ -338,6 +357,27 @@ pub enum TacticKind {
     Revert(Vec<Ident>),
     /// `injection h with a b`: the field equations of `h : C as = C bs`.
     Injection(Expr, Vec<Ident>),
+    /// `subst h` / `subst x`: eliminate a variable using an equation.
+    Subst(Ident),
+    /// `rcases e with pat` / `obtain pat := e`
+    Rcases(Expr, RPat),
+    Rintro(Vec<RPat>),
+    /// `by_cases h : P`: split on `P` and `¬P` (classical).
+    ByCases(Option<Ident>, Expr),
+    /// `by_contra h`: assume the negation of the goal, prove `False`.
+    ByContra(Option<Ident>),
+    /// `specialize h(a, b)`: replace `h` by its instance.
+    Specialize(Expr),
+    /// `refine e`: `exact` with `_` holes that become new goals.
+    Refine(Expr),
+    /// `funext x y`: prove `f = g` from `f x = g x`.
+    Funext(Vec<Ident>),
+    /// `congr`: reduce `f a = f b` to `a = b`.
+    Congr,
+    /// `calc { a = b := p; _ = c := q }`
+    Calc(Vec<CalcStep>),
+    /// Try `rfl`, `assumption`, `True.intro`, `decide`, `omega`, `simp`.
+    Trivial,
     /// `exists w`: prove `Exists p` by giving the witness.
     Exists(Expr),
     /// `{ ... }`: run on the first goal, which it must close.

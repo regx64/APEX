@@ -10,6 +10,7 @@
 use super::*;
 
 mod auto;
+mod extra;
 mod imatch;
 mod noconf;
 mod omega;
@@ -449,6 +450,17 @@ impl<'a> Cx<'a> {
             }
             TacticKind::Contradiction => self.t_contradiction(st, g, span),
             TacticKind::Injection(h, names) => self.t_injection(st, g, h, names, span),
+            TacticKind::Subst(n) => self.t_subst(st, g, n, span),
+            TacticKind::Rcases(e, pat) => self.t_rcases(st, g, e, pat, span),
+            TacticKind::Rintro(pats) => self.t_rintro(st, g, pats, span),
+            TacticKind::ByCases(n, p) => self.t_by_cases(st, g, n.as_ref(), p, span),
+            TacticKind::ByContra(n) => self.t_by_contra(st, g, n.as_ref(), span),
+            TacticKind::Specialize(e) => self.t_specialize(st, g, e, span),
+            TacticKind::Refine(e) => self.t_refine(st, g, e, span),
+            TacticKind::Funext(ns) => self.t_funext(st, g, ns, span),
+            TacticKind::Congr => self.t_congr(st, g, span),
+            TacticKind::Calc(steps) => self.t_calc(st, g, steps, span),
+            TacticKind::Trivial => self.t_trivial(st, g, span),
             TacticKind::Symm => {
                 let Some((l, alpha, a, b)) = self.eq_parts(&g.target) else {
                     return err(span, "`symm` needs a goal of the form `a = b`");
