@@ -44,11 +44,14 @@ theorem add_comm(a: Nat, b: Nat): a + b = b + a := by {
 | `symm` | `a = b`를 `b = a`로 |
 | `show T` | 목표를 정의적으로 같은 `T`로 바꾼다 |
 | `have h: T := e` / `:= by { .. }` | 보조 사실을 가설로 |
-| `rw [h, <- g]` | 등식으로 다시 쓴다 (`<-`는 오른쪽에서 왼쪽). 끝나면 `rfl`을 시도한다 |
+| `rw [h, <- g] at h2` | 등식으로 다시 쓴다 (`<-`는 오른쪽에서 왼쪽). 끝나면 `rfl`을 시도한다 |
 | `simp [h, f]` | 재작성을 반복 (`#[simp]` 정리 + 주어진 가설/정의). 끝나면 `rfl`/`assumption` |
 | `unfold f` | 정의 `f`를 펼친다 (뒤에 `rfl` 시도) |
-| `induction x with { c(a, ih) => { .. }, .. }` | `x`에 대한 귀납 (재귀 인자마다 `ih`) |
+| `induction x generalizing a b with { c(a, ih) => { .. }, .. }` | `x`에 대한 귀납 (재귀 인자마다 `ih`) |
 | `cases x with { c(a) => { .. }, .. }` | 경우 나누기 (`And`, `Or`, `False`, `Nat`, 사용자 `enum` …) |
+| `omega` | `Nat`의 선형 산술 (`+`, 리터럴 곱, `nat_sub`, `le`/`lt`/`=`/`Not`/`And`, 가설의 `Or`/`≠`) 증명. 아래 §6 |
+| `revert x` | 가설 `x`(와 그에 의존하는 것)를 목표의 전제로 되돌린다 |
+| `exists w` | `Exists(p)`를 증인 `w`로 증명 (뒤에 `rfl` 시도) |
 | `decide` | 닫힌 명제(`=`, `And`, `Or`, `True`)를 계산으로 증명, 거짓이면 오류 |
 
 `with { .. }`를 생략하면 새 목표들이 순서대로 남는다 (자동 이름 `x1`, `ih`), 각각 `{ .. }` 블록으로 닫는다.
@@ -70,10 +73,23 @@ theorem add_comm(a: Nat, b: Nat): a + b = b + a := by {
 
 ## 5. 하지 않는 것 (솔직하게)
 
-- **`omega`**: 파서는 알지만 "not implemented"로 거부한다. 증명 항을 만드는 선형 산술 결정 절차(또는 반사 증명)가 필요하다.
-- `rw ... at h`, `simp at h`, `simp`의 조건부 재작성, 합동(congruence) 기반 재작성 (지금은 모티브 방식).
-- 인덱스가 있는 귀납 족(`Eq`, 벡터)에 대한 `induction`/`cases`, 그리고 목표가 의존하는 가설이 있을 때의 자동 일반화
-  (`generalizing`). 후자는 "hypothesis depends on" 오류로 거부한다.
+- `omega`는 유리수 완화(Fourier–Motzkin)라서 정수에서만 성립하는 모순(예: `2x = 1`), `/`, `%`, 비선형 곱, `Or` 목표, `Int`는 못 한다.
+- `simp`의 조건부 재작성, 합동(congruence) 기반 재작성 (지금은 모티브 방식), 함수 방정식 보조정리 자동 생성 (닫힌 호출은 계산으로 펼치지만 열린 재귀 호출은 `show`로 직접 쓴다).
+- 인덱스가 있는 귀납 족(`Eq`, 벡터)에 대한 `induction`/`cases`.
 - `Exists`, `Iff`, 순서 관계 `<`/`≤`의 명제 버전 (`<`는 `Bool`을 돌려준다). `decide`는 `Not`을 모른다.
 - 상호 재귀/깊은 필드 재귀 함수에 대한 방정식 보조정리 자동 생성 (재귀 함수는 `induction` 뒤 `rfl`/`simp [f]`의 계산으로).
 - 탭틱 매크로, `repeat`/`try`/`first`/`<;>` 조합자, `sorry`.
+
+## 6. omega (증명을 만드는 선형 산술)
+
+`omega`는 결정 절차를 **믿지 않고** 커널이 다시 계산하게 한다.
+
+1. 목표의 부정을 가설로 놓고 (`le`/`lt`는 `le_of_not_lt`, `=`는 `le_antisymm`으로 두 방향) 목표를 `False`로 만든다.
+2. 가설을 `lo ≤ hi` 꼴의 부등식으로 바꾼다. 원자(atom)는 산술이 아닌 부분 항이다. `Or`, `≠`, `a - b`(절단 뺄셈)는 목표 수준에서 경우를 나눈다.
+3. Fourier–Motzkin 소거로 모순을 찾고, 그 과정의 비음수 곱(Farkas 증명서)을 기록한다. 검색은 Rust에서 하므로 신뢰 대상이 아니다.
+4. 증명은 `omega_sound cs ws env rfl rfl holds`: 라이브러리(`prelude_omega.apex`, 전부 탭틱으로 증명)의 `omega_sound`는
+   "증명서 검사가 `true`이면 가설들이 모순"이라는 정리이고, 검사(`dominates`, `nat_lt`)는 커널이 `rfl`로 계산한다.
+   선형식의 정규화가 의미를 보존한다는 사실(`lin_sound`)과 `Nat`의 순서 보조정리들이 그 위에 있다.
+
+`le`/`lt`는 `Exists`로 정의된 `Prop`이다 (`le(a, b) := Exists(|k| a + k = b)`). 표면 문법의 `<`는 `Bool`이므로
+증명에서는 `le(a, b)`/`lt(a, b)`를 쓴다. 이 라이브러리는 `omega`/`termination_by`/`decreasing_by`가 소스에 나올 때만 로드된다.

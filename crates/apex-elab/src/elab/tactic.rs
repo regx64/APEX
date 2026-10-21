@@ -9,6 +9,8 @@
 
 use super::*;
 
+mod omega;
+
 /// One open goal.
 #[derive(Clone)]
 struct Goal {
@@ -453,10 +455,7 @@ impl<'a> Cx<'a> {
                 self.solve(st, &g, pf);
                 Ok(vec![])
             }
-            TacticKind::Omega => err(
-                span,
-                "`omega` is not implemented yet (use `induction`, `rw` and `simp`)",
-            ),
+            TacticKind::Omega => self.t_omega(st, g, span),
             TacticKind::Show(e) => {
                 let ty = self.elab_type(e)?;
                 self.solve_goals(false)?;

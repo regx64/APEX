@@ -693,20 +693,27 @@ impl<'a> TypeChecker<'a> {
             | Term::Const(..)
             | Term::Lit(_)
             | Term::Str(_) => Ok(Mult::Zero),
-            Term::App(f, a) => {
-                let uf = self.usage(f, x)?;
-                let tf = self.infer(f)?;
-                let tf = self.whnf(&tf)?;
-                let m = match &*tf {
-                    Term::Pi(m, ..) => *m,
-                    _ => return kerr(format!("function expected, got {}", self.pp(f))),
-                };
-                let ua = if m == Mult::Zero {
-                    Mult::Zero
-                } else {
-                    self.usage(a, x)?
-                };
-                Ok(uf.plus(m.times(ua)))
+            Term::App(..) => {
+                // walk the whole application spine at once: one `infer` of the head,
+                // then peel the Π binders to learn each argument's multiplicity
+                let (f, args) = app_spine(t);
+                let mut total = self.usage(&f, x)?;
+                let mut ty = self.infer(&f)?;
+                for a in &args {
+                    ty = self.whnf(&ty)?;
+                    let (m, body) = match &*ty {
+                        Term::Pi(m, _, b) => (*m, b.clone()),
+                        _ => return kerr(format!("function expected, got {}", self.pp(&f))),
+                    };
+                    let ua = if m == Mult::Zero {
+                        Mult::Zero
+                    } else {
+                        self.usage(a, x)?
+                    };
+                    total = total.plus(m.times(ua));
+                    ty = instantiate(&body, a);
+                }
+                Ok(total)
             }
             Term::Lam(m, d, b) => {
                 let y = self.fresh("y", d.clone(), *m);
@@ -722,8 +729,11 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_binder_usage(&mut self, m: Mult, body: &T, x: u32) -> KResult<()> {
+        if m == Mult::Omega {
+            return Ok(()); // unrestricted: any use is fine
+        }
         let u = self.usage(body, x)?;
-        if m == Mult::Omega || u == m {
+        if u == m {
             Ok(())
         } else {
             kerr(format!(
@@ -742,14 +752,22 @@ impl<'a> TypeChecker<'a> {
                 self.check_mults(&body)?;
                 self.check_binder_usage(*m, &body, x)
             }
-            Term::App(f, a) => {
-                self.check_mults(f)?;
-                let tf = self.infer(f)?;
-                let tf = self.whnf(&tf)?;
-                match &*tf {
-                    Term::Pi(Mult::Zero, ..) => Ok(()),
-                    _ => self.check_mults(a),
+            Term::App(..) => {
+                let (f, args) = app_spine(t);
+                self.check_mults(&f)?;
+                let mut ty = self.infer(&f)?;
+                for a in &args {
+                    ty = self.whnf(&ty)?;
+                    let (m, body) = match &*ty {
+                        Term::Pi(m, _, b) => (*m, b.clone()),
+                        _ => return kerr(format!("function expected, got {}", self.pp(&f))),
+                    };
+                    if m != Mult::Zero {
+                        self.check_mults(a)?;
+                    }
+                    ty = instantiate(&body, a);
                 }
+                Ok(())
             }
             Term::Let(m, ty, v, b) => {
                 self.check_mults(v)?;
