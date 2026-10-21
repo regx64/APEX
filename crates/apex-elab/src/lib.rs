@@ -16,6 +16,12 @@ pub fn check_source(path: &str, src: &str) -> Result<Elaborator, String> {
     let module =
         apex_syntax::parse(src).map_err(|e| render_diagnostic(path, src, &e.msg, e.span))?;
     let mut el = Elaborator::new();
+    if ["omega", "termination_by", "decreasing_by"]
+        .iter()
+        .any(|w| src.contains(w))
+    {
+        el.load_omega();
+    }
     el.elab_module(&module)
         .map_err(|e| render_full(path, src, e.code.as_deref(), &e.msg, e.span, &e.notes))?;
     Ok(el)

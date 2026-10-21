@@ -326,7 +326,7 @@ impl Parser {
             }
             "exists" => K::Exists(self.expr()?),
             "cases" => {
-                let v = self.ident()?;
+                let v = self.expr()?;
                 K::Cases(v, self.case_arms()?)
             }
             _ => unreachable!("every tactic word is handled"),

@@ -437,6 +437,24 @@ impl Elaborator {
         el
     }
 
+    /// Load the verified arithmetic library behind `omega` (order on `Nat`, the
+    /// reflected linear-expression language, and the certificate checker). It costs
+    /// startup time, so it is loaded only for programs that use it.
+    pub fn load_omega(&mut self) {
+        if self.env.get("omega_sound").is_some() {
+            return;
+        }
+        let src = include_str!("prelude_omega.apex");
+        let module = apex_syntax::parse(src).expect("omega prelude must parse");
+        self.elab_module(&module).unwrap_or_else(|e| {
+            let (line, _) = e.span.line_col(src);
+            panic!(
+                "omega prelude must elaborate: {} (prelude_omega.apex line {line})",
+                e.msg
+            )
+        });
+    }
+
     pub fn env(&self) -> &Env {
         &self.env
     }

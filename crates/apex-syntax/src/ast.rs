@@ -267,7 +267,8 @@ pub enum TacticKind {
     Unfold(Vec<Ident>),
     /// `induction x generalizing a b with { .. }`
     Induction(Ident, Vec<Ident>, Option<Vec<CaseArm>>),
-    Cases(Ident, Option<Vec<CaseArm>>),
+    /// `cases h` or `cases f(x)` (the proof term is first introduced as a hypothesis)
+    Cases(Expr, Option<Vec<CaseArm>>),
     /// Move hypotheses back into the goal as premises.
     Revert(Vec<Ident>),
     /// `exists w`: prove `Exists p` by giving the witness.

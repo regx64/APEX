@@ -206,6 +206,13 @@ impl<'a> TypeChecker<'a> {
         id
     }
 
+    /// Replace the recorded type of a local with a definitionally equal one.
+    pub fn set_local_ty(&mut self, id: u32, ty: T) {
+        if let Some(l) = self.lctx.get_mut(&id) {
+            l.ty = ty;
+        }
+    }
+
     pub fn local_mult(&self, id: u32) -> Option<Mult> {
         self.lctx.get(&id).map(|l| l.mult)
     }

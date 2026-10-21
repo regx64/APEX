@@ -138,6 +138,16 @@ impl<'a> Cx<'a> {
             let z = self.tc.zonk(target);
             self.devirt(&z)
         };
+        // hypotheses are shown and matched in their devirtualized form too
+        for (_, v) in &saved {
+            if let Term::FVar(id) = &**v {
+                if let Ok(ty) = self.tc.local_ty(*id) {
+                    let z = self.tc.zonk(&ty);
+                    let d = self.devirt(&z);
+                    self.tc.set_local_ty(*id, d);
+                }
+            }
+        }
         let mv = self.tc.new_mvar(target.clone());
         let mut st = Tac {
             goals: vec![Goal {
@@ -330,7 +340,8 @@ impl<'a> Cx<'a> {
             None => self.elab(e, None)?,
         };
         self.solve_goals(false)?;
-        Ok(self.tc.zonk(&t))
+        let t = self.tc.zonk(&t);
+        Ok(self.devirt(&t))
     }
 
     /// Close an equation whose sides are definitionally equal.
@@ -509,8 +520,29 @@ impl<'a> Cx<'a> {
                 Ok(vec![ng])
             }
             TacticKind::Exists(e) => self.t_exists(st, g, e, span),
-            TacticKind::Cases(x, arms) => {
-                self.t_induct(st, g, x, &[], arms.as_deref(), false, span)
+            TacticKind::Cases(e, arms) => {
+                if let ExprKind::Var(n) = &e.kind {
+                    let x = Ident {
+                        name: n.clone(),
+                        span: e.span,
+                    };
+                    return self.t_induct(st, g, &x, &[], arms.as_deref(), false, span);
+                }
+                // a proof term: bind it to a hypothesis first
+                let tm = self.elab_in_goal(e, None)?;
+                let ty = from_kernel(self.tc.infer(&tm), e.span)?;
+                let ty = self.tc.zonk(&ty);
+                let fv = self.tc.fresh("_c", ty.clone(), Mult::Omega);
+                let mut ng = self.new_goal(&g, g.target.clone(), "");
+                ng.scope.push(("_c".into(), fvar(fv)));
+                let lam_mv = self.tc.new_mvar(pi(Mult::Omega, ty, g.target.clone()));
+                st.sol.insert(mvar_id(&lam_mv), Sol::Lam(vec![fv], ng.mv));
+                self.solve(st, &g, app(lam_mv, tm));
+                let x = Ident {
+                    name: "_c".into(),
+                    span: e.span,
+                };
+                self.t_induct(st, ng, &x, &[], arms.as_deref(), false, span)
             }
         }
     }
@@ -1190,6 +1222,14 @@ impl<'a> Cx<'a> {
                     }
                 }
             }
+            if next.is_none() {
+                let tgt = self.tc.zonk(&cur.target);
+                if let Some(t2) = self.eval_step(&tgt) {
+                    let ng = self.new_goal(&cur, t2, "");
+                    self.solve(st, &cur, mvar(ng.mv));
+                    next = Some(ng);
+                }
+            }
             match next {
                 Some(ng) => {
                     cur = ng;
@@ -1205,6 +1245,106 @@ impl<'a> Cx<'a> {
             return err(span, "`simp` made no progress");
         }
         Ok(vec![cur])
+    }
+
+    /// Evaluate a call of a user function whose arguments are constructors: unfold the
+    /// definition and reduce (beta, iota) until a constructor or another function
+    /// shows. Stuck results (a recursor waiting for a variable) are rejected, so the
+    /// goal never fills up with recursor terms.
+    fn eval_head(&mut self, s: &T) -> Option<T> {
+        let mut cur = s.clone();
+        for _ in 0..32 {
+            let (h, args) = app_spine(&cur);
+            let Term::Const(n, ls) = &*h else { break };
+            if matches!(&**n, "Nat.add" | "Nat.mul") || self.is_theorem_const(n) {
+                break;
+            }
+            let Some(Decl::Def { lparams, val, .. }) = self.env.get(n).cloned() else {
+                break;
+            };
+            if lparams.len() != ls.len() {
+                break;
+            }
+            let unfolded = head_beta(&mk_apps(&instantiate_levels(&val, &lparams, ls), &args));
+            let next = self.tc.whnf_core(&unfolded).ok()?;
+            let next = self.reduce_recs(&next, 0);
+            let (nh, _) = app_spine(&next);
+            // an unfolding that gets stuck on a variable is not wanted: keep the call
+            if matches!(&*nh, Term::Lam(..) | Term::MVar(_)) || self.mentions_rec(&next) {
+                break;
+            }
+            cur = next;
+        }
+        (cur != *s).then_some(cur)
+    }
+
+    /// Reduce recursor applications inside a term (innermost first) where their
+    /// major premise is a constructor.
+    fn reduce_recs(&mut self, t: &T, depth: u32) -> T {
+        if depth > 64 {
+            return t.clone();
+        }
+        match &**t {
+            Term::App(..) => {
+                let (f, args) = app_spine(t);
+                let f2 = self.reduce_recs(&f, depth + 1);
+                let args2: Vec<T> = args
+                    .iter()
+                    .map(|a| self.reduce_recs(a, depth + 1))
+                    .collect();
+                let t2 = mk_apps(&f2, &args2);
+                if let Term::Const(n, _) = &*f2 {
+                    if matches!(self.env.get(n), Some(Decl::Rec(_))) {
+                        if let Ok(r) = self.tc.whnf_core(&t2) {
+                            if r != t2 {
+                                return self.reduce_recs(&r, depth + 1);
+                            }
+                        }
+                    }
+                }
+                t2
+            }
+            Term::Lam(m, ty, b) => lam(
+                *m,
+                self.reduce_recs(ty, depth + 1),
+                self.reduce_recs(b, depth + 1),
+            ),
+            _ => t.clone(),
+        }
+    }
+
+    /// Does the term contain a recursor? (A call of a recursive function on an open
+    /// term unfolds into one; such results are not wanted in the goal.)
+    fn mentions_rec(&self, t: &T) -> bool {
+        match &**t {
+            Term::Const(n, _) => matches!(self.env.get(n), Some(Decl::Rec(_))),
+            Term::App(f, a) => self.mentions_rec(f) || self.mentions_rec(a),
+            Term::Lam(_, ty, b) | Term::Pi(_, ty, b) => {
+                self.mentions_rec(ty) || self.mentions_rec(b)
+            }
+            Term::Let(_, ty, v, b) => {
+                self.mentions_rec(ty) || self.mentions_rec(v) || self.mentions_rec(b)
+            }
+            _ => false,
+        }
+    }
+
+    /// One evaluation step somewhere inside `t`: the new type, if any.
+    fn eval_step(&mut self, t: &T) -> Option<T> {
+        let mut subs = Vec::new();
+        collect_subterms(t, &mut subs);
+        for s in subs {
+            let (h, args) = app_spine(&s);
+            let Term::Const(n, _) = &*h else { continue };
+            if args.is_empty() || !matches!(self.env.get(n), Some(Decl::Def { .. })) {
+                continue;
+            }
+            if let Some(w) = self.eval_head(&s) {
+                let body = replace_term(t, &s, 0);
+                return Some(instantiate(&body, &w));
+            }
+        }
+        None
     }
 
     fn is_theorem_const(&mut self, name: &str) -> bool {
