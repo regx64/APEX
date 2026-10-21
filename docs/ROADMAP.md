@@ -24,7 +24,7 @@
 
 ## C. 메타프로그래밍
 - [x] C-1 사용자 정의 문법: `infixl|infixr|infix N "op" => f;`, `prefix N "op" => f;`(연산자는 렉서가 선언을 보고 토큰화, 우선순위는 Lean 숫자를 결합력으로 변환), `macro name(a, b) => 템플릿;`(구문 치환, 위생적이지 않음). 탭틱 블록 안에서도 동작. 구문 범주/`syntax`/`macro_rules` 패턴/`elab`은 아직(C-2)
-- [ ] C-2 `MetaM`/`TacticM`, `elab`; 탭틱을 APEX 자신으로 재작성 (부트스트랩)
+- [~] C-2 하지 않음: `MetaM`/`TacticM`/`elab`와 APEX로 쓴 탭틱(부트스트랩)은 없다. 대신 C-1의 사용자 탭틱 매크로(`tactic name(a) { .. }`)와 조합자(`first`/`try`/`repeat`/`<;>`/`all_goals`)로 증명 자동화를 짠다. 탭틱 엔진이 Rust에 있고 항을 만드는 "프로그램"이라는 설계(docs/TACTICS.md §1)는 부트스트랩의 전제이지만 메타 데이터 타입(Expr/MVar/Goal)을 APEX에 노출하는 일은 시작하지 않았다
 
 ## D. 자동화
 - [x] D-1 `omega` (Nat 선형 산술, 검증된 증명서 검사기; Int·`/`·`%`·정수 타이트닝은 아직)
