@@ -1,0 +1,2 @@
+// out: ()
+fn main() -> Unit { () }

@@ -1,0 +1,8 @@
+[package]
+name = "apex-eval"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+apex-kernel = { path = "../apex-kernel" }
+apex-elab = { path = "../apex-elab" }

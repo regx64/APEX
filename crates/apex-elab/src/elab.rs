@@ -579,18 +579,8 @@ impl<'a> Cx<'a> {
         }
     }
 
-    fn nat_literal(&self, n: u64, span: Span) -> R<T> {
-        if n > 100_000 {
-            return err(
-                span,
-                "integer literals above 100000 are not supported yet (unary Nat)",
-            );
-        }
-        let mut t = cnst("Nat.zero".into(), vec![]);
-        for _ in 0..n {
-            t = app(cnst("Nat.succ".into(), vec![]), t);
-        }
-        Ok(t)
+    fn nat_literal(&self, n: u64, _span: Span) -> R<T> {
+        Ok(lit(n))
     }
 
     fn elab(&mut self, e: &Expr, exp: Option<&T>) -> R<T> {

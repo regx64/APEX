@@ -100,7 +100,7 @@ impl<'a> TypeChecker<'a> {
             Term::Lam(m, ty, b) => lam(*m, self.zonk(ty), self.zonk(b)),
             Term::Pi(m, ty, b) => pi(*m, self.zonk(ty), self.zonk(b)),
             Term::Let(m, ty, v, b) => let_(*m, self.zonk(ty), self.zonk(v), self.zonk(b)),
-            Term::BVar(_) | Term::FVar(_) => t.clone(),
+            Term::BVar(_) | Term::FVar(_) | Term::Lit(_) => t.clone(),
         }
     }
 
@@ -309,6 +309,7 @@ impl<'a> TypeChecker<'a> {
             },
             Term::FVar(id) => self.local_ty(*id),
             Term::Sort(l) => Ok(sort(l.clone().succ())),
+            Term::Lit(_) => Ok(cnst("Nat".into(), vec![])),
             Term::Const(n, ls) => self.env.const_type(n, ls),
             Term::App(f, a) => {
                 let tf = self.infer(f)?;
@@ -403,6 +404,27 @@ impl<'a> TypeChecker<'a> {
         None
     }
 
+    /// `Nat.add` / `Nat.mul` on two literals compute directly.
+    fn reduce_nat_op(&mut self, f: &T, args: &[T]) -> KResult<Option<T>> {
+        let Term::Const(n, _) = &**f else {
+            return Ok(None);
+        };
+        if args.len() != 2 || !matches!(&**n, "Nat.add" | "Nat.mul") {
+            return Ok(None);
+        }
+        let a = self.whnf(&args[0])?;
+        let b = self.whnf(&args[1])?;
+        let (Term::Lit(x), Term::Lit(y)) = (&*a, &*b) else {
+            return Ok(None);
+        };
+        let r = if &**n == "Nat.add" {
+            x.checked_add(*y)
+        } else {
+            x.checked_mul(*y)
+        };
+        Ok(r.map(lit))
+    }
+
     /// ι-reduction: `I.rec ... (c fields)` ⟶ minor premise applied to the fields.
     fn reduce_rec(&mut self, f: &T, args: &[T]) -> KResult<Option<T>> {
         let (n, ls) = match &**f {
@@ -418,7 +440,10 @@ impl<'a> TypeChecker<'a> {
         if args.len() <= major_idx || r.lparams.len() != ls.len() {
             return Ok(None);
         }
-        let major = self.whnf(&args[major_idx])?;
+        let mut major = self.whnf(&args[major_idx])?;
+        if let Term::Lit(n) = &*major {
+            major = lit_to_ctor(*n);
+        }
         let (mh, margs) = app_spine(&major);
         let cname = match &*mh {
             Term::Const(c, _) => c,
@@ -469,7 +494,10 @@ impl<'a> TypeChecker<'a> {
                             }
                             cur = mk_apps(&body, &args[i..]);
                         }
-                        Term::Const(..) => match self.reduce_rec(&f2, &args)? {
+                        Term::Const(..) => match self
+                            .reduce_nat_op(&f2, &args)?
+                            .map_or_else(|| self.reduce_rec(&f2, &args), |r| Ok(Some(r)))?
+                        {
                             Some(r) => cur = r,
                             None => return Ok(if f == f2 { cur } else { mk_apps(&f2, &args) }),
                         },
@@ -505,6 +533,20 @@ impl<'a> TypeChecker<'a> {
         }
         if let Some(r) = self.try_assign(&a, &b)? {
             return Ok(r);
+        }
+        match (&*a, &*b) {
+            (Term::Lit(x), Term::Lit(y)) => return Ok(x == y),
+            (Term::Lit(n), _) => {
+                if let Some(r) = self.lit_vs(*n, &b)? {
+                    return Ok(r);
+                }
+            }
+            (_, Term::Lit(n)) => {
+                if let Some(r) = self.lit_vs(*n, &a)? {
+                    return Ok(r);
+                }
+            }
+            _ => {}
         }
         match (&*a, &*b) {
             (Term::Sort(l1), Term::Sort(l2)) => return Ok(self.level_eq(l1, l2)),
@@ -557,6 +599,22 @@ impl<'a> TypeChecker<'a> {
         self.proof_irrelevant(&a, &b)
     }
 
+    /// Compare literal `n` with `Nat.zero` or `Nat.succ x`; `None` if `other` is neither.
+    fn lit_vs(&mut self, n: u64, other: &T) -> KResult<Option<bool>> {
+        let (h, args) = app_spine(other);
+        match (&*h, args.len()) {
+            (Term::Const(c, _), 0) if &**c == "Nat.zero" => Ok(Some(n == 0)),
+            (Term::Const(c, _), 1) if &**c == "Nat.succ" => {
+                if n == 0 {
+                    Ok(Some(false))
+                } else {
+                    Ok(Some(self.is_def_eq(&lit(n - 1), &args[0])?))
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn spine_def_eq(&mut self, a: &T, b: &T) -> KResult<bool> {
         let (fa, aa) = app_spine(a);
         let (fb, ab) = app_spine(b);
@@ -606,9 +664,12 @@ impl<'a> TypeChecker<'a> {
     pub fn usage(&mut self, t: &T, x: u32) -> KResult<Mult> {
         match &**t {
             Term::FVar(y) => Ok(if *y == x { Mult::One } else { Mult::Zero }),
-            Term::BVar(_) | Term::MVar(_) | Term::Sort(_) | Term::Pi(..) | Term::Const(..) => {
-                Ok(Mult::Zero)
-            }
+            Term::BVar(_)
+            | Term::MVar(_)
+            | Term::Sort(_)
+            | Term::Pi(..)
+            | Term::Const(..)
+            | Term::Lit(_) => Ok(Mult::Zero),
             Term::App(f, a) => {
                 let uf = self.usage(f, x)?;
                 let tf = self.infer(f)?;
@@ -676,5 +737,13 @@ impl<'a> TypeChecker<'a> {
             }
             _ => Ok(()),
         }
+    }
+}
+
+fn lit_to_ctor(n: u64) -> T {
+    if n == 0 {
+        cnst("Nat.zero".into(), vec![])
+    } else {
+        app(cnst("Nat.succ".into(), vec![]), lit(n - 1))
     }
 }

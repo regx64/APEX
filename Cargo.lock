@@ -7,6 +7,7 @@ name = "apex-driver"
 version = "0.0.1"
 dependencies = [
  "apex-elab",
+ "apex-eval",
  "apex-span",
  "apex-syntax",
 ]
@@ -18,6 +19,14 @@ dependencies = [
  "apex-kernel",
  "apex-span",
  "apex-syntax",
+]
+
+[[package]]
+name = "apex-eval"
+version = "0.0.1"
+dependencies = [
+ "apex-elab",
+ "apex-kernel",
 ]
 
 [[package]]

@@ -25,8 +25,21 @@ fn main() -> ExitCode {
                 Err((String::new(), apex_span::Span::default()))
             }
         }),
+        (Some("run"), Some(path)) => run(path, |src| match apex_eval::run_source(path, src) {
+            Ok(out) => {
+                println!("{out}");
+                Ok(())
+            }
+            Err(rendered) => {
+                eprint!("{rendered}");
+                if !rendered.ends_with('\n') {
+                    eprintln!();
+                }
+                Err((String::new(), apex_span::Span::default()))
+            }
+        }),
         _ => {
-            eprintln!("usage: apex <lex|parse|check> <file.apex>");
+            eprintln!("usage: apex <lex|parse|check|run> <file.apex>");
             ExitCode::from(2)
         }
     }
