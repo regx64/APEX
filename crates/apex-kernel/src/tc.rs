@@ -545,9 +545,7 @@ impl<'a> TypeChecker<'a> {
                             };
                             match r {
                                 Some(r) => cur = r,
-                                None => {
-                                    return Ok(if f == f2 { cur } else { mk_apps(&f2, &args) })
-                                }
+                                None => return Ok(if f == f2 { cur } else { mk_apps(&f2, &args) }),
                             }
                         }
                         _ => return Ok(if f == f2 { cur } else { mk_apps(&f2, &args) }),
@@ -581,6 +579,12 @@ impl<'a> TypeChecker<'a> {
             return Ok(true);
         }
         if let Some(r) = self.try_assign(&a, &b)? {
+            return Ok(r);
+        }
+        if let Some(r) = self.struct_eta(&a, &b)? {
+            return Ok(r);
+        }
+        if let Some(r) = self.struct_eta(&b, &a)? {
             return Ok(r);
         }
         match (&*a, &*b) {
@@ -646,6 +650,81 @@ impl<'a> TypeChecker<'a> {
             return Ok(true);
         }
         self.proof_irrelevant(&a, &b)
+    }
+
+    /// Structure η: `S.mk a₁ … aₙ ≡ e` when `e : S` and each `aᵢ ≡ projᵢ e`. Only for
+    /// structures whose field types do not depend on earlier fields (the projections
+    /// are built from the recursor with a constant motive). `None` when not applicable.
+    fn struct_eta(&mut self, ctor_side: &T, other: &T) -> KResult<Option<bool>> {
+        let (h, cargs) = app_spine(ctor_side);
+        let (cname, clevels) = match &*h {
+            Term::Const(n, ls) => (n.clone(), ls.clone()),
+            _ => return Ok(None),
+        };
+        let env = self.env;
+        let Some(Decl::Ctor(ci)) = env.get(&cname) else {
+            return Ok(None);
+        };
+        let Some(Decl::Inductive(ii)) = env.get(&ci.ind) else {
+            return Ok(None);
+        };
+        if ii.ctors.len() != 1 || ii.nindices != 0 || ii.is_prop {
+            return Ok(None);
+        }
+        let Some(Decl::Rec(ri)) = env.get(&ii.rec) else {
+            return Ok(None);
+        };
+        if ri.nmotives != 1 || ri.lparams.len() != ii.lparams.len() + 1 {
+            return Ok(None);
+        }
+        if cargs.len() != ci.nparams + ci.nfields {
+            return Ok(None);
+        }
+        // the other side must not itself be a constructor application of this type
+        let (oh, _) = app_spine(other);
+        if matches!(&*oh, Term::Const(n, _) if *n == cname) {
+            return Ok(None);
+        }
+        let oty = match self.infer(other) {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+        let oty = self.whnf(&oty)?;
+        let (th, targs) = app_spine(&oty);
+        if !matches!(&*th, Term::Const(n, _) if *n == ci.ind) || targs.len() != ci.nparams {
+            return Ok(None);
+        }
+        // field types, to check independence of earlier fields
+        let cty = env.const_type(&cname, &clevels)?;
+        let rest = self.instantiate_pis(&cty, &targs)?;
+        let (fvs, _) = self.telescope(&rest, None)?;
+        for (i, &f) in fvs.iter().enumerate() {
+            let fty = self.local_ty(f)?;
+            if fvs[..i].iter().any(|&g| contains_fvar(&fty, g)) {
+                return Ok(None);
+            }
+        }
+        let ind_levels = clevels.clone();
+        let this = mk_apps(&cnst(ci.ind.clone(), ind_levels.clone()), &targs);
+        for (i, &f) in fvs.iter().enumerate() {
+            let fty = self.local_ty(f)?;
+            let lvl = {
+                let s = self.infer(&fty)?;
+                self.ensure_sort(&s)?
+            };
+            let mut rec_levels = vec![lvl];
+            rec_levels.extend(ind_levels.iter().cloned());
+            let motive = lam(Mult::Omega, this.clone(), fty.clone());
+            let minor = self.mk_lam(&fvs, &fvar(fvs[i]));
+            let proj = mk_apps(
+                &cnst(ii.rec.clone(), rec_levels),
+                &[targs.clone(), vec![motive, minor, other.clone()]].concat(),
+            );
+            if !self.is_def_eq(&cargs[ci.nparams + i], &proj)? {
+                return Ok(Some(false));
+            }
+        }
+        Ok(Some(true))
     }
 
     /// Compare literal `n` with `Nat.zero` or `Nat.succ x`; `None` if `other` is neither.

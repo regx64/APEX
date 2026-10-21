@@ -847,7 +847,10 @@ fn add_quot(env: &mut Env) -> KResult<()> {
                     arrow(v("a"), v("b")),
                     arrow(
                         arrow(v("b"), v("a")),
-                        app_(cl("Eq", vec![Level::of_nat(1)]), vec![prop(), v("a"), v("b")]),
+                        app_(
+                            cl("Eq", vec![Level::of_nat(1)]),
+                            vec![prop(), v("a"), v("b")],
+                        ),
                     ),
                 ),
             ),
@@ -866,10 +869,7 @@ fn add_quot(env: &mut Env) -> KResult<()> {
                 Mult::Zero,
                 "α",
                 sort_(u.clone()),
-                arrow(
-                    v("α"),
-                    app_(cl("Nonempty", vec![u.clone()]), vec![v("α")]),
-                ),
+                arrow(v("α"), app_(cl("Nonempty", vec![u.clone()]), vec![v("α")])),
             )
             .build()?,
         )],

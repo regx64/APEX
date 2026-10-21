@@ -9,8 +9,8 @@
 ## A. 커널 완성
 - [x] A-1a 커널의 상호 귀납형 (`add_mutual`: 모티브/마이너 전체 공유, 재귀자별 ι-규칙; 테스트 `mutual_tree_forest_recursion_reduces`)
 - [ ] A-1b 표면 문법 `mutual { .. }`, 엘라보레이터/`match`/탭틱 지원, 중첩 귀납형 (`List<Tree>` 필드)
-- [ ] A-2 구조 η, 단위형 η
-- [ ] A-3 몫 `Quot` (mk/lift/ind/sound), 공리 `propext`, `Classical.choice`
+- [x] A-2 구조 η (필드 타입이 앞 필드에 의존하지 않는 구조체; 의존 구조체와 단위형 η는 아직)
+- [x] A-3 몫 `Quot` (mk/lift/ind/sound, lift 계산 규칙은 커널 whnf), 공리 `propext`/`Classical.choice`, `funext`는 Quot.sound에서 유도(공리 아님). 표면 문법 `forall(x: A) -> T` 추가
 - [ ] A-4 인덱스 족 전체 (`induction`/`cases`가 인덱스를 다루도록)
 - [ ] A-5 `Nat`/`Int`/`String` 리터럴 가속(GMP급), 독립 검증기
 

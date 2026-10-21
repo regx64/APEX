@@ -985,7 +985,10 @@ impl Parser {
             }
             T::Ident(name)
                 if name == "forall"
-                    && self.toks.get(self.pos + 1).is_some_and(|t| t.kind == T::LParen) =>
+                    && self
+                        .toks
+                        .get(self.pos + 1)
+                        .is_some_and(|t| t.kind == T::LParen) =>
             {
                 self.bump();
                 self.expect(&T::LParen)?;
