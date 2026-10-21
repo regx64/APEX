@@ -48,6 +48,8 @@ pub enum ItemKind {
     Variable(Vec<Param>),
     /// `mutual { enum A .. enum B .. }`
     Mutual(Vec<Item>),
+    /// `universe u v;`: universe level names usable in `Type(u)` / `Sort(u)`.
+    Universe(Vec<Ident>),
     /// `import a.b;`: the module `a/b.apex`, loaded by the driver before this file.
     Import(String),
     /// `infixl 65 "+++" => f;`, `prefix 100 "~" => g;`, `macro m(a, b) => e;`: already applied
@@ -66,6 +68,8 @@ pub struct Ident {
 pub struct Generic {
     pub name: Ident,
     pub ty: Option<Expr>,
+    /// A trait parameter written `out C`: determined by the implementation, not by the use.
+    pub out: bool,
 }
 
 /// `Own` is a linear (multiplicity 1) parameter; `Default` is inferred from the type.

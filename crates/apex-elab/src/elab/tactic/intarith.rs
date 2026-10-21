@@ -136,11 +136,20 @@ impl<'a> Cx<'a> {
                 // a - b is a + (-b)
                 let (pa, qa, ha) = self.int_pair(&a, atoms, span)?;
                 let (pb, qb, hb) = self.int_pair(&b, atoms, span)?;
-                let nb = lib("int_neg", &[b.clone()]);
+                let nb = lib("int_neg", std::slice::from_ref(&b));
                 let hnb = lib("int_neg_rep", &[b, pb.clone(), qb.clone(), hb]);
                 let pf = lib(
                     "int_add_rep",
-                    &[a, nb, pa.clone(), qa.clone(), qb.clone(), pb.clone(), ha, hnb],
+                    &[
+                        a,
+                        nb,
+                        pa.clone(),
+                        qa.clone(),
+                        qb.clone(),
+                        pb.clone(),
+                        ha,
+                        hnb,
+                    ],
                 );
                 (nat_add(pa, qb), nat_add(qa, pb), pf)
             }
@@ -152,7 +161,10 @@ impl<'a> Cx<'a> {
                     &[a, b, pa.clone(), qa.clone(), pb.clone(), qb.clone(), ha, hb],
                 );
                 (
-                    nat_add(nat_mul(pa.clone(), pb.clone()), nat_mul(qa.clone(), qb.clone())),
+                    nat_add(
+                        nat_mul(pa.clone(), pb.clone()),
+                        nat_mul(qa.clone(), qb.clone()),
+                    ),
                     nat_add(nat_mul(pa, qb), nat_mul(qa, pb)),
                     pf,
                 )
@@ -170,7 +182,12 @@ impl<'a> Cx<'a> {
             ),
             IntView::Atom => match atoms.iter().find(|a| a.term == e) {
                 Some(a) => (a.p.clone(), a.q.clone(), a.h.clone()),
-                None => return err(span, "internal error: an integer atom has no representation"),
+                None => {
+                    return err(
+                        span,
+                        "internal error: an integer atom has no representation",
+                    )
+                }
             },
         })
     }
@@ -186,7 +203,15 @@ impl<'a> Cx<'a> {
         let tgt = self.tc.zonk(&g.target);
         let mut g = g;
         if let Some(IntRel::Not(_)) = self.int_rel(&tgt) {
-            let gs = self.t_intro(st, g, &[Ident { name: "_neg".into(), span }], span)?;
+            let gs = self.t_intro(
+                st,
+                g,
+                &[Ident {
+                    name: "_neg".into(),
+                    span,
+                }],
+                span,
+            )?;
             g = gs.into_iter().next().expect("intro gives one goal");
         }
         let tgt = self.tc.zonk(&g.target);
@@ -275,10 +300,7 @@ impl<'a> Cx<'a> {
                     IntRel::Not(_) => continue,
                 },
             };
-            let fact = lib(
-                name,
-                &[a, b, pa, qa, pb, qb, ha, hb, hv.clone()],
-            );
+            let fact = lib(name, &[a, b, pa, qa, pb, qb, ha, hb, hv.clone()]);
             let ty = from_kernel(self.tc.infer(&fact), span)?;
             let ty = self.tc.zonk(&ty);
             let fname = format!("_inat{}", g.scope.len());
@@ -307,14 +329,8 @@ impl<'a> Cx<'a> {
                 };
                 let ng = self.new_goal(&g, target, "");
                 let pf = match &rel {
-                    IntRel::Eq(..) => lib(
-                        lemma,
-                        &[a, b, pa, qa, pb, qb, ha, hb, mvar(ng.mv)],
-                    ),
-                    _ => lib(
-                        lemma,
-                        &[a, b, pa, qa, pb, qb, ha, hb, mvar(ng.mv)],
-                    ),
+                    IntRel::Eq(..) => lib(lemma, &[a, b, pa, qa, pb, qb, ha, hb, mvar(ng.mv)]),
+                    _ => lib(lemma, &[a, b, pa, qa, pb, qb, ha, hb, mvar(ng.mv)]),
                 };
                 self.solve(st, &g, pf);
                 let _ = Self::int_const;

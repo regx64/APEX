@@ -773,6 +773,7 @@ impl Parser {
                         | "macro"
                         | "tactic"
                         | "mutual"
+                        | "universe"
                 ) =>
             {
                 Some(w.clone())
@@ -796,6 +797,14 @@ impl Parser {
                 }
                 "section" => ItemKind::Section(self.item_block()?),
                 "mutual" => ItemKind::Mutual(self.item_block()?),
+                "universe" => {
+                    let mut names = Vec::new();
+                    while matches!(self.peek(), T::Ident(_)) {
+                        names.push(self.ident()?);
+                    }
+                    self.eat(&T::Semi);
+                    ItemKind::Universe(names)
+                }
                 "infixl" | "infixr" | "infix" | "prefix" => {
                     let prec = match self.peek().clone() {
                         T::Nat(n) => {
@@ -966,6 +975,14 @@ impl Parser {
             return Ok(out);
         }
         while *self.peek() != T::Gt {
+            let out_param = matches!(self.peek(), T::Ident(w) if w == "out")
+                && matches!(
+                    self.toks.get(self.pos + 1).map(|t| &t.kind),
+                    Some(T::Ident(_))
+                );
+            if out_param {
+                self.bump();
+            }
             let name = match self.peek().clone() {
                 T::Lifetime(name) => Ident {
                     name,
@@ -978,7 +995,11 @@ impl Parser {
             } else {
                 None
             };
-            out.push(Generic { name, ty });
+            out.push(Generic {
+                name,
+                ty,
+                out: out_param,
+            });
             if !self.eat(&T::Comma) {
                 break;
             }

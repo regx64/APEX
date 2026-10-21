@@ -321,6 +321,8 @@ type Aliases = HashMap<String, String>;
 /// Trait bookkeeping shared by all declarations.
 #[derive(Default)]
 struct Tables {
+    /// Declared universe level names (`universe u;`), in declaration order.
+    universes: Vec<String>,
     /// trait name -> its methods (in field order)
     traits: HashMap<String, TraitInfo>,
     /// trait name -> instance definitions
@@ -355,6 +357,8 @@ struct TraitInfo {
     methods: Vec<String>,
     /// names of the trait's own type parameters (after `Self`)
     generics: Vec<String>,
+    /// which class parameters (`Self` first) are outputs, found by the implementation
+    outs: Vec<bool>,
     /// methods that have a default body
     defaults: HashMap<String, FnDecl>,
 }
@@ -517,6 +521,13 @@ impl Elaborator {
         }
     }
 
+    /// Load `Option`, `Subtype` and `Sigma`.
+    pub fn load_data(&mut self) {
+        if self.env.get("option_map").is_none() {
+            self.load_lib("data", include_str!("prelude_data.apex"));
+        }
+    }
+
     /// Load classical logic (`em`, `by_contradiction`); `by_cases` and `by_contra` need it.
     pub fn load_classical(&mut self) {
         if self.env.get("em").is_none() {
@@ -555,6 +566,9 @@ impl Elaborator {
             .unwrap_or_default();
         if mentions("ring") {
             self.load_ring();
+        }
+        if ["Option", "Subtype", "Sigma"].iter().any(|n| mentions(n)) {
+            self.load_data();
         }
         if mentions("Int") || mentions("int_add_comm") {
             self.load_int();
@@ -643,6 +657,14 @@ impl Elaborator {
             }
             ItemKind::Import(_) | ItemKind::Notation(_) => Ok(()), // loaded by the driver / applied by the parser
             ItemKind::Mutual(items) => self.elab_mutual(items, item.span),
+            ItemKind::Universe(names) => {
+                for n in names {
+                    if !self.tables.universes.contains(&n.name) {
+                        self.tables.universes.push(n.name.clone());
+                    }
+                }
+                Ok(())
+            }
             ItemKind::Open(name) => {
                 self.tables.opens.push(name.clone());
                 Ok(())
@@ -740,10 +762,27 @@ impl Elaborator {
             }
             self.user_defs.insert(name.name.clone());
         }
+        // universe parameters: the declared level names this definition mentions
+        let mut used: Vec<Name> = Vec::new();
+        collect_level_params(&ty, &mut used);
+        collect_level_params(&val, &mut used);
+        let mut lps: Vec<String> = self
+            .tables
+            .universes
+            .iter()
+            .filter(|u| used.iter().any(|x| &**x == u.as_str()))
+            .cloned()
+            .collect();
+        for u in &used {
+            if !lps.iter().any(|x| x.as_str() == &**u) {
+                lps.push(u.to_string());
+            }
+        }
+        let lps: Vec<&str> = lps.iter().map(String::as_str).collect();
         if trusted {
-            from_kernel(self.env.add_def_trusted(&kname, &[], ty, val), name.span)?;
+            from_kernel(self.env.add_def_trusted(&kname, &lps, ty, val), name.span)?;
         } else {
-            from_kernel(self.env.add_def(&kname, &[], ty, val), name.span)?;
+            from_kernel(self.env.add_def(&kname, &lps, ty, val), name.span)?;
         }
         self.masks.insert(kname.clone(), mask);
         Ok(kname)
@@ -1299,6 +1338,7 @@ impl Elaborator {
                 span: d.name.span,
             },
             ty: None,
+            out: false,
         }];
         gens.extend(d.generics.iter().cloned());
         let nparams = gens
@@ -1353,6 +1393,14 @@ impl Elaborator {
         }
         let info = TraitInfo {
             nparams,
+            outs: std::iter::once(false)
+                .chain(
+                    d.generics
+                        .iter()
+                        .filter(|g| !g.name.name.starts_with('\''))
+                        .map(|g| g.out),
+                )
+                .collect(),
             methods,
             generics: d
                 .generics
@@ -2002,6 +2050,37 @@ impl<'a> Cx<'a> {
         Ok(Some(mk_apps(&f, &[a, b, inst, t.clone()])))
     }
 
+    /// A universe level expression: `u`, `3`, `u + 1`, `max(u, v)`, `imax(u, v)`.
+    fn elab_level(&self, e: &Expr) -> R<Level> {
+        match &e.kind {
+            ExprKind::Nat(n) => Ok(Level::of_nat(*n as u32)),
+            ExprKind::Var(n) if self.tables.universes.contains(n) => Ok(Level::param(n)),
+            ExprKind::Var(n) => err(
+                e.span,
+                format!("unknown universe `{n}` (declare it with `universe {n};`)"),
+            ),
+            ExprKind::Binary(BinOp::Add, a, b) => {
+                let base = self.elab_level(a)?;
+                match &b.kind {
+                    ExprKind::Nat(k) => Ok((0..*k).fold(base, |l, _| l.succ())),
+                    _ => err(b.span, "a universe level can only be increased by a number"),
+                }
+            }
+            ExprKind::Call(f, args) if args.len() == 2 => match &f.kind {
+                ExprKind::Var(n) if n == "max" => Ok(Level::max(
+                    self.elab_level(&args[0])?,
+                    self.elab_level(&args[1])?,
+                )),
+                ExprKind::Var(n) if n == "imax" => Ok(Level::imax(
+                    self.elab_level(&args[0])?,
+                    self.elab_level(&args[1])?,
+                )),
+                _ => err(e.span, "expected a universe level"),
+            },
+            _ => err(e.span, "expected a universe level"),
+        }
+    }
+
     fn nat_literal(&self, n: u64, _span: Span) -> R<T> {
         Ok(lit(n))
     }
@@ -2081,6 +2160,13 @@ impl<'a> Cx<'a> {
                 Ok(self.tc.mk_pi(&fvs, &b))
             }
             ExprKind::Call(f, args) | ExprKind::TypeApp(f, args) => {
+                // `Type(u)` is `Sort (u+1)`, `Sort(u)` the sort itself
+                if let (ExprKind::Var(n), [lv]) = (&f.kind, args.as_slice()) {
+                    if (n == "Type" || n == "Sort") && self.lookup_scope(n).is_none() {
+                        let l = self.elab_level(lv)?;
+                        return Ok(sort(if n == "Type" { l.succ() } else { l }));
+                    }
+                }
                 if let Some(p) = path_name(f) {
                     if self.is_rec_name(&p) {
                         return self.elab_rec_call(&p, args, exp, e.span);
@@ -2616,6 +2702,24 @@ impl<'a> Cx<'a> {
         Ok(None)
     }
 
+    /// Does a class goal still have unknowns in the parameters that select the
+    /// implementation? (Output parameters may be unknown: the implementation fixes them.)
+    fn stuck_outside_outs(&self, goal: &T) -> bool {
+        if first_mvar(goal).is_none() {
+            return false;
+        }
+        let (h, args) = app_spine(goal);
+        let Term::Const(n, _) = &*h else {
+            return true;
+        };
+        let Some(info) = self.tables.traits.get(&**n) else {
+            return true;
+        };
+        args.iter()
+            .enumerate()
+            .any(|(i, a)| !info.outs.get(i).copied().unwrap_or(false) && first_mvar(a).is_some())
+    }
+
     /// Resolve pending instance arguments. A goal whose type still has
     /// metavariables is postponed unless `force` is set.
     fn solve_goals(&mut self, force: bool) -> R<()> {
@@ -2677,7 +2781,7 @@ impl<'a> Cx<'a> {
                 }
                 let ty = from_kernel(self.tc.infer(&mv), span)?;
                 let ty = self.tc.zonk(&ty);
-                let stuck = first_mvar(&ty).is_some();
+                let stuck = self.stuck_outside_outs(&ty);
                 // Like Rust, never pick an impl to *determine* a type: a goal whose
                 // type is still unknown stays pending, and is an error at the end.
                 if stuck {
@@ -4390,5 +4494,26 @@ fn flatten_add<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
             flatten_add(b, out);
         }
         _ => out.push(e),
+    }
+}
+
+fn collect_level_params(t: &T, out: &mut Vec<Name>) {
+    match &**t {
+        Term::Sort(l) => l.collect_params(out),
+        Term::Const(_, ls) => ls.iter().for_each(|l| l.collect_params(out)),
+        Term::App(f, a) => {
+            collect_level_params(f, out);
+            collect_level_params(a, out);
+        }
+        Term::Lam(_, ty, b) | Term::Pi(_, ty, b) => {
+            collect_level_params(ty, out);
+            collect_level_params(b, out);
+        }
+        Term::Let(_, ty, v, b) => {
+            collect_level_params(ty, out);
+            collect_level_params(v, out);
+            collect_level_params(b, out);
+        }
+        _ => {}
     }
 }
