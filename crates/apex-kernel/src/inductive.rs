@@ -28,10 +28,13 @@ pub struct MutualDecl {
     pub types: Vec<TypeDecl>,
 }
 
+/// A recursive field `Π xs, I_j params js`: (xs, js, j).
+type RecField = (Vec<u32>, Vec<T>, usize);
+
 struct CtorAnalysis {
     fields: Vec<u32>,
     /// Per field: `Some((xs, js, j))` if recursive — `Π xs, I_j params js`.
-    recs: Vec<Option<(Vec<u32>, Vec<T>, usize)>>,
+    recs: Vec<Option<RecField>>,
     res_indices: Vec<T>,
     field_is_prop: Vec<bool>,
 }
@@ -43,7 +46,7 @@ impl<'a> TypeChecker<'a> {
         inds: &[Name],
         levels: &[Level],
         pargs: &[T],
-    ) -> KResult<Option<(Vec<u32>, Vec<T>, usize)>> {
+    ) -> KResult<Option<RecField>> {
         if !inds.iter().any(|n| contains_const(fty, n)) {
             return Ok(None);
         }
