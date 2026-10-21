@@ -96,3 +96,44 @@ theorem fib_add_two(n: Nat): fib(n + 2) = fib(n) + fib(n + 1) := by { rfl }
 // ---- primes ----
 fn is_prime(p: Nat) -> Prop { And(le(2, p), forall(d: Nat) -> dvd(d, p) -> Or(d = 1, d = p)) }
 theorem not_prime_one(h: is_prime(1)): False := by { obtain (h1, _) := h; omega }
+
+theorem lt_two_pow(n: Nat): lt(n, nat_pow(2, n)) := by {
+    induction n with {
+        zero => { simp [nat_pow]; omega },
+        succ(k, ih) => { simp [nat_pow]; omega },
+    }
+}
+fn sum_odd(n: Nat) -> Nat { match n { 0 => 0, Nat.succ(k) => sum_odd(k) + (2 * k + 1) } }
+theorem sum_of_odds(n: Nat): sum_odd(n) = n * n := by {
+    induction n with {
+        zero => { rfl },
+        succ(k, ih) => {
+            have e: sum_odd(Nat.succ(k)) = sum_odd(k) + (2 * k + 1) := by { rfl };
+            rw [e, ih]; ring
+        },
+    }
+}
+theorem square_even_of_even(n: Nat, h: is_even(n)): is_even(n * n) := dvd_of_dvd_mul(2, n, n, h)
+theorem dvd_le(a: Nat, b: Nat, hb: lt(0, b), h: dvd(a, b)): le(a, b) := by {
+    obtain (k, hk) := h;
+    cases k with {
+        zero => { simp at hk; omega },
+        succ(m) => { rw [hk]; exists a * m; ring },
+    }
+}
+theorem prime_two(): is_prime(2) := by {
+    constructor;
+    omega;
+    intro d hd;
+    have hle: le(d, 2) := dvd_le(d, 2, by { omega }, hd);
+    obtain (k, hk) := hd;
+    cases d with {
+        zero => { simp at hk; exfalso; omega },
+        succ(d1) => {
+            cases d1 with {
+                zero => { left; rfl },
+                succ(d2) => { right; omega },
+            }
+        },
+    }
+}
