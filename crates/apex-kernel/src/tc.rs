@@ -489,6 +489,25 @@ impl<'a> TypeChecker<'a> {
         Ok(Some(res))
     }
 
+    /// The quotient computation rule: `Quot.lift f h (Quot.mk r a) ⟶ f a`.
+    fn reduce_quot(&mut self, f: &T, args: &[T]) -> KResult<Option<T>> {
+        let Term::Const(n, _) = &**f else {
+            return Ok(None);
+        };
+        if &**n != "Quot.lift" || args.len() < 6 {
+            return Ok(None);
+        }
+        let q = self.whnf(&args[5])?;
+        let (h, margs) = app_spine(&q);
+        match &*h {
+            Term::Const(c, _) if &**c == "Quot.mk" && margs.len() == 3 => Ok(Some(mk_apps(
+                &args[3],
+                &[vec![margs[2].clone()], args[6..].to_vec()].concat(),
+            ))),
+            _ => Ok(None),
+        }
+    }
+
     /// β, ζ and ι reduction to weak head normal form (no δ).
     pub fn whnf_core(&mut self, t: &T) -> KResult<T> {
         let mut cur = t.clone();
@@ -516,13 +535,21 @@ impl<'a> TypeChecker<'a> {
                             }
                             cur = mk_apps(&body, &args[i..]);
                         }
-                        Term::Const(..) => match self
-                            .reduce_nat_op(&f2, &args)?
-                            .map_or_else(|| self.reduce_rec(&f2, &args), |r| Ok(Some(r)))?
-                        {
-                            Some(r) => cur = r,
-                            None => return Ok(if f == f2 { cur } else { mk_apps(&f2, &args) }),
-                        },
+                        Term::Const(..) => {
+                            let r = match self.reduce_nat_op(&f2, &args)? {
+                                Some(r) => Some(r),
+                                None => match self.reduce_rec(&f2, &args)? {
+                                    Some(r) => Some(r),
+                                    None => self.reduce_quot(&f2, &args)?,
+                                },
+                            };
+                            match r {
+                                Some(r) => cur = r,
+                                None => {
+                                    return Ok(if f == f2 { cur } else { mk_apps(&f2, &args) })
+                                }
+                            }
+                        }
                         _ => return Ok(if f == f2 { cur } else { mk_apps(&f2, &args) }),
                     }
                 }

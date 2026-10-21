@@ -514,7 +514,7 @@ impl<'r> Checker<'r> {
                 }
             },
             ExprKind::Neg(a) => self.expr(a, true),
-            ExprKind::Arrow(..) => Out::default(),
+            ExprKind::Arrow(..) | ExprKind::Forall(..) => Out::default(),
             ExprKind::Binary(_, l, r) => {
                 let callee = (self.resolver)(e.span);
                 self.call(callee.as_ref(), None, &[&**l, &**r])

@@ -265,6 +265,11 @@ impl<'a> Evaluator<'a> {
                     let name = if r { "Bool.true" } else { "Bool.false" };
                     Ok(Value::Ctor(name.into(), Rc::new(vec![])))
                 }
+                "Quot.mk" => self.force(&args[2]),
+                "Quot.lift" => {
+                    let f = self.force(&args[3])?;
+                    self.apply(f, args[5].clone())
+                }
                 "Nat.toString" => Ok(Value::Str(self.force_nat(&args[0])?.to_string().into())),
                 // IO.pure α x / IO.bind α β m k / IO.print s
                 "IO.pure" => Ok(Value::Io(Rc::new(IoAct::Pure(args[1].clone())))),
@@ -366,6 +371,9 @@ impl<'a> Evaluator<'a> {
             "nat_sub" | "nat_beq" | "nat_lt" | "nat_div" | "nat_rem" => fun(Kind::Prim, 2),
             "String.append" => fun(Kind::Prim, 2),
             "Nat.toString" => fun(Kind::Prim, 1),
+            // quotients: `Quot.mk α r a` is `a`; `Quot.lift α r β f h q` is `f q`
+            "Quot.mk" => fun(Kind::Prim, 3),
+            "Quot.lift" => fun(Kind::Prim, 6),
             "IO.pure" => fun(Kind::Prim, 2),
             "IO.bind" => fun(Kind::Prim, 4),
             "IO.print" => fun(Kind::Prim, 1),

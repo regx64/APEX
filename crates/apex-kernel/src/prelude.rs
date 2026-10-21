@@ -158,6 +158,7 @@ pub fn add_prelude(env: &mut Env) -> KResult<()> {
     crate::below::add_pprod(env)?;
     add_io(env)?;
     add_logic(env)?;
+    add_quot(env)?;
     for ind in ["Nat", "Bool", "Unit", "List"] {
         env.add_below_brec(ind)?;
     }
@@ -680,5 +681,358 @@ fn add_logic(env: &mut Env) -> KResult<()> {
             .build()?,
         )?;
     }
+    Ok(())
+}
+
+/// Quotient types and the classical axioms, as in Lean: `Quot.lift` computes on
+/// `Quot.mk` (a kernel rule in `whnf`), everything else is an axiom. `funext` is
+/// *derived* from `Quot.sound`, not assumed.
+fn add_quot(env: &mut Env) -> KResult<()> {
+    let u = Level::param("u");
+    let v_ = Level::param("v");
+    let rel = |al: Raw| arrow(al.clone(), arrow(al, prop()));
+    let quot = |u: &Level, al: Raw, r: Raw| app_(cl("Quot", vec![u.clone()]), vec![al, r]);
+    // Quot.{u} {α : Sort u} (r : α → α → Prop) : Sort u
+    env.add_axiom(
+        "Quot",
+        &["u"],
+        pi_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            pi_m(Mult::Zero, "r", rel(v("α")), sort_(u.clone())),
+        )
+        .build()?,
+    )?;
+    // Quot.mk {α} (r) (a : α) : Quot r
+    env.add_axiom(
+        "Quot.mk",
+        &["u"],
+        pi_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            pi_m(
+                Mult::Zero,
+                "r",
+                rel(v("α")),
+                pi_("a", v("α"), quot(&u, v("α"), v("r"))),
+            ),
+        )
+        .build()?,
+    )?;
+    // Quot.lift {α r} {β : Sort v} (f : α → β) (h : ∀ a b, r a b → f a = f b) : Quot r → β
+    let eq_v = |b: Raw, x: Raw, y: Raw| app_(cl("Eq", vec![v_.clone()]), vec![b, x, y]);
+    env.add_axiom(
+        "Quot.lift",
+        &["u", "v"],
+        pi_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            pi_m(
+                Mult::Zero,
+                "r",
+                rel(v("α")),
+                pi_m(
+                    Mult::Zero,
+                    "β",
+                    sort_(v_.clone()),
+                    pi_(
+                        "f",
+                        arrow(v("α"), v("β")),
+                        arrow(
+                            pi_(
+                                "a",
+                                v("α"),
+                                pi_(
+                                    "b",
+                                    v("α"),
+                                    arrow(
+                                        app_(v("r"), vec![v("a"), v("b")]),
+                                        eq_v(
+                                            v("β"),
+                                            app_(v("f"), vec![v("a")]),
+                                            app_(v("f"), vec![v("b")]),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                            arrow(quot(&u, v("α"), v("r")), v("β")),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+    )?;
+    // Quot.ind {α r} {β : Quot r → Prop} (mk : ∀ a, β (Quot.mk r a)) : ∀ q, β q
+    env.add_axiom(
+        "Quot.ind",
+        &["u"],
+        pi_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            pi_m(
+                Mult::Zero,
+                "r",
+                rel(v("α")),
+                pi_m(
+                    Mult::Zero,
+                    "β",
+                    arrow(quot(&u, v("α"), v("r")), prop()),
+                    arrow(
+                        pi_(
+                            "a",
+                            v("α"),
+                            app_(
+                                v("β"),
+                                vec![app_(
+                                    cl("Quot.mk", vec![u.clone()]),
+                                    vec![v("α"), v("r"), v("a")],
+                                )],
+                            ),
+                        ),
+                        pi_("q", quot(&u, v("α"), v("r")), app_(v("β"), vec![v("q")])),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+    )?;
+    // Quot.sound {α r} {a b} : r a b → Quot.mk r a = Quot.mk r b
+    let mk = |a: Raw| app_(cl("Quot.mk", vec![u.clone()]), vec![v("α"), v("r"), a]);
+    env.add_axiom(
+        "Quot.sound",
+        &["u"],
+        pi_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            pi_m(
+                Mult::Zero,
+                "r",
+                rel(v("α")),
+                pi_(
+                    "a",
+                    v("α"),
+                    pi_(
+                        "b",
+                        v("α"),
+                        arrow(
+                            app_(v("r"), vec![v("a"), v("b")]),
+                            app_(
+                                cl("Eq", vec![u.clone()]),
+                                vec![quot(&u, v("α"), v("r")), mk(v("a")), mk(v("b"))],
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+    )?;
+    // propext {a b : Prop} : (a → b) → (b → a) → a = b
+    env.add_axiom(
+        "propext",
+        &[],
+        pi_(
+            "a",
+            prop(),
+            pi_(
+                "b",
+                prop(),
+                arrow(
+                    arrow(v("a"), v("b")),
+                    arrow(
+                        arrow(v("b"), v("a")),
+                        app_(cl("Eq", vec![Level::of_nat(1)]), vec![prop(), v("a"), v("b")]),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+    )?;
+    // inductive Nonempty.{u} (α : Sort u) : Prop | intro (val : α)
+    env.add_inductive(InductiveDecl {
+        name: "Nonempty".into(),
+        lparams: vec!["u".into()],
+        nparams: 1,
+        ty: pi_m(Mult::Zero, "α", sort_(u.clone()), prop()).build()?,
+        ctors: vec![(
+            "Nonempty.intro".into(),
+            pi_m(
+                Mult::Zero,
+                "α",
+                sort_(u.clone()),
+                arrow(
+                    v("α"),
+                    app_(cl("Nonempty", vec![u.clone()]), vec![v("α")]),
+                ),
+            )
+            .build()?,
+        )],
+    })?;
+    // Classical.choice {α : Sort u} : Nonempty α → α
+    env.add_axiom(
+        "Classical.choice",
+        &["u"],
+        pi_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            arrow(app_(cl("Nonempty", vec![u.clone()]), vec![v("α")]), v("α")),
+        )
+        .build()?,
+    )?;
+    // funext, derived from Quot.sound:
+    //   funext {α} {β : α → Sort v} {f g : Π x, β x} (h : Π x, f x = g x) : f = g
+    let fty = || pi_("x", v("α"), app_(v("β"), vec![v("x")]));
+    let pi_level = Level::imax(u.clone(), v_.clone());
+    let rel_fn = lam_(
+        "f",
+        fty(),
+        lam_(
+            "g",
+            fty(),
+            pi_(
+                "x",
+                v("α"),
+                eq_v(
+                    app_(v("β"), vec![v("x")]),
+                    app_(v("f"), vec![v("x")]),
+                    app_(v("g"), vec![v("x")]),
+                ),
+            ),
+        ),
+    );
+    let quot_fn = || {
+        app_(
+            cl("Quot", vec![pi_level.clone()]),
+            vec![fty(), rel_fn.clone()],
+        )
+    };
+    // extfunApp : Quot r → Π x, β x
+    let ext = lam_(
+        "q",
+        quot_fn(),
+        lam_(
+            "x",
+            v("α"),
+            app_(
+                cl("Quot.lift", vec![pi_level.clone(), v_.clone()]),
+                vec![
+                    fty(),
+                    rel_fn.clone(),
+                    app_(v("β"), vec![v("x")]),
+                    lam_("f", fty(), app_(v("f"), vec![v("x")])),
+                    lam_(
+                        "f",
+                        fty(),
+                        lam_(
+                            "g",
+                            fty(),
+                            lam_(
+                                "h",
+                                app_(rel_fn.clone(), vec![v("f"), v("g")]),
+                                app_(v("h"), vec![v("x")]),
+                            ),
+                        ),
+                    ),
+                    v("q"),
+                ],
+            ),
+        ),
+    );
+    let mk_fn = |f: Raw| {
+        app_(
+            cl("Quot.mk", vec![pi_level.clone()]),
+            vec![fty(), rel_fn.clone(), f],
+        )
+    };
+    env.add_def(
+        "funext",
+        &["u", "v"],
+        pi_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            pi_m(
+                Mult::Zero,
+                "β",
+                arrow(v("α"), sort_(v_.clone())),
+                pi_(
+                    "f",
+                    fty(),
+                    pi_(
+                        "g",
+                        fty(),
+                        arrow(
+                            pi_(
+                                "x",
+                                v("α"),
+                                eq_v(
+                                    app_(v("β"), vec![v("x")]),
+                                    app_(v("f"), vec![v("x")]),
+                                    app_(v("g"), vec![v("x")]),
+                                ),
+                            ),
+                            app_(
+                                cl("Eq", vec![pi_level.clone()]),
+                                vec![fty(), v("f"), v("g")],
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+        lam_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            lam_m(
+                Mult::Zero,
+                "β",
+                arrow(v("α"), sort_(v_.clone())),
+                lam_(
+                    "f",
+                    fty(),
+                    lam_(
+                        "g",
+                        fty(),
+                        lam_(
+                            "h",
+                            pi_(
+                                "x",
+                                v("α"),
+                                eq_v(
+                                    app_(v("β"), vec![v("x")]),
+                                    app_(v("f"), vec![v("x")]),
+                                    app_(v("g"), vec![v("x")]),
+                                ),
+                            ),
+                            app_(
+                                cl("congr_arg", vec![pi_level.clone(), pi_level.clone()]),
+                                vec![
+                                    quot_fn(),
+                                    fty(),
+                                    mk_fn(v("f")),
+                                    mk_fn(v("g")),
+                                    ext,
+                                    app_(
+                                        cl("Quot.sound", vec![pi_level.clone()]),
+                                        vec![fty(), rel_fn.clone(), v("f"), v("g"), v("h")],
+                                    ),
+                                ],
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+    )?;
     Ok(())
 }

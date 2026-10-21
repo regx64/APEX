@@ -407,6 +407,16 @@ impl Elaborator {
             ("Or", vec![Exp, Exp]),
             ("Or.inl", vec![Imp, Imp, Exp]),
             ("Or.inr", vec![Imp, Imp, Exp]),
+            ("Quot", vec![Imp, Exp]),
+            ("Quot.mk", vec![Imp, Exp, Exp]),
+            ("Quot.lift", vec![Imp, Imp, Imp, Exp, Exp, Exp]),
+            ("Quot.ind", vec![Imp, Imp, Imp, Exp, Exp]),
+            ("Quot.sound", vec![Imp, Imp, Imp, Imp, Exp]),
+            ("funext", vec![Imp, Imp, Imp, Imp, Exp]),
+            ("propext", vec![Imp, Imp, Exp, Exp]),
+            ("Classical.choice", vec![Imp, Exp]),
+            ("Nonempty", vec![Exp]),
+            ("Nonempty.intro", vec![Imp, Exp]),
             ("Exists", vec![Imp, Exp]),
             ("Exists.intro", vec![Imp, Imp, Exp, Exp]),
         ] {
@@ -1654,6 +1664,22 @@ impl<'a> Cx<'a> {
                 let a = self.elab_type(a)?;
                 let b = self.elab_type(b)?;
                 Ok(pi(Mult::Omega, a, b))
+            }
+            ExprKind::Forall(binders, body) => {
+                let depth = self.scope.len();
+                let mut fvs = Vec::new();
+                for (n, t) in binders {
+                    let ty = self.elab_type(t)?;
+                    let fv = self.tc.fresh(&n.name, ty, Mult::Omega);
+                    self.scope.push((n.name.clone(), fvar(fv)));
+                    fvs.push(fv);
+                }
+                let b = self.elab_type(body);
+                self.scope.truncate(depth);
+                let b = b?;
+                self.tc.zonk_locals();
+                let b = self.tc.zonk(&b);
+                Ok(self.tc.mk_pi(&fvs, &b))
             }
             ExprKind::Call(f, args) | ExprKind::TypeApp(f, args) => {
                 if let Some(p) = path_name(f) {
@@ -3645,6 +3671,9 @@ fn mentions_expr(e: &Expr, name: &str) -> bool {
         ExprKind::Neg(a) | ExprKind::Deref(a) => mentions_expr(a, name),
         ExprKind::Binary(_, a, b) | ExprKind::Arrow(a, b) => {
             mentions_expr(a, name) || mentions_expr(b, name)
+        }
+        ExprKind::Forall(bs, body) => {
+            bs.iter().any(|(_, t)| mentions_expr(t, name)) || mentions_expr(body, name)
         }
         ExprKind::Ref { inner, .. } => mentions_expr(inner, name),
         ExprKind::Call(f, args) | ExprKind::TypeApp(f, args) => {

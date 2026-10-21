@@ -212,6 +212,8 @@ pub enum ExprKind {
     },
     /// Function type `A -> B`.
     Arrow(Box<Expr>, Box<Expr>),
+    /// `forall(x: A, y: B) -> T`: a dependent function type.
+    Forall(Vec<(Ident, Expr)>, Box<Expr>),
     Call(Box<Expr>, Vec<Expr>),
     /// Generic application in type position: `Vec<T, n>`.
     TypeApp(Box<Expr>, Vec<Expr>),

@@ -983,6 +983,27 @@ impl Parser {
                 self.bump();
                 ExprKind::Wild
             }
+            T::Ident(name)
+                if name == "forall"
+                    && self.toks.get(self.pos + 1).is_some_and(|t| t.kind == T::LParen) =>
+            {
+                self.bump();
+                self.expect(&T::LParen)?;
+                let mut binders = Vec::new();
+                while *self.peek() != T::RParen {
+                    let n = self.ident()?;
+                    self.expect(&T::Colon)?;
+                    let ty = self.ty()?;
+                    binders.push((n, ty));
+                    if !self.eat(&T::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&T::RParen)?;
+                self.expect(&T::Arrow)?;
+                let body = self.ty()?;
+                ExprKind::Forall(binders, Box::new(body))
+            }
             T::Ident(name) => {
                 self.bump();
                 ExprKind::Var(name)
