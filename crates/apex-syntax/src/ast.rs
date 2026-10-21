@@ -22,6 +22,17 @@ pub enum ItemKind {
     Trait(TraitDecl),
     Impl(ImplDecl),
     Theorem(TheoremDecl),
+    /// `namespace A.B { .. }`: `fn`s and `theorem`s declared inside get the prefix `A.B.`
+    Namespace {
+        name: String,
+        items: Vec<Item>,
+    },
+    /// `open A.B;`: names of the namespace can be used unqualified.
+    Open(String),
+    /// `section { variable (n: Nat); .. }`: scopes `open` and `variable`.
+    Section(Vec<Item>),
+    /// `variable (n: Nat);` adds `n` as a leading parameter of every later declaration that mentions it.
+    Variable(Vec<Param>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

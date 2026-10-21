@@ -18,7 +18,7 @@
 - [x] B-1a 구조적 재귀의 일반화: 커널이 `T.below`/`T.brecOn`을 생성(인덱스 없는 단순 귀납형), 엘라보레이터는 직접 필드 재귀가 안 되면 brecOn 모드로 재시도 (`fib(m)+fib(m+1)`, 3단계 깊이, 리스트 두 칸 건너뛰기). 한계: 인덱스/상호/중첩/선형 필드 타입, 고차 재귀 필드는 brecOn이 없음
 - [ ] B-1b 잘 정초된 재귀 + `termination_by`/`decreasing_by` (`Acc`, `WellFounded.fix`; `omega` 필요)
 - [ ] B-2 종속 패턴 매칭 (motive 일반화, 인덱스 족 `match`)
-- [ ] B-3 `namespace`/`open`/`section`/`variable`/`universe`
+- [x] B-3 `namespace`/`open`/`section`/`variable` (`fn`·`theorem`만 접두사; `struct`/`enum`/`trait`은 이름공간 안에서도 전역 이름. `universe`는 아직: 우주는 암시적). 섹션 변수는 언급한 선언에 선행 인자로 붙는다 (재귀 호출에서는 직접 넘겨야 함)
 - [ ] B-4 `structure` 상속, `class` 완전판(출력 매개변수, 기본 인스턴스), `deriving`
 - [ ] B-5 강제 변환, 암시 람다, 서브타입/`Σ`/`∃` 표기
 

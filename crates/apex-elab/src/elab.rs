@@ -333,6 +333,12 @@ struct Tables {
     sigs: HashMap<String, Callee>,
     /// Theorems marked `#[simp]`, in declaration order (kernel names).
     simp: Vec<String>,
+    /// The enclosing `namespace` path, outermost first.
+    ns: Vec<String>,
+    /// Namespaces brought into scope by `open`.
+    opens: Vec<String>,
+    /// `variable` declarations of the enclosing sections.
+    vars: Vec<Param>,
 }
 
 #[derive(Clone)]
@@ -474,7 +480,58 @@ impl Elaborator {
             ItemKind::Struct(s) => self.elab_struct(s, item.span),
             ItemKind::Trait(t) => self.elab_trait(t, item.span),
             ItemKind::Impl(i) => self.elab_impl(i, item.span),
+            ItemKind::Namespace { name, items } => {
+                let saved = (
+                    self.tables.ns.len(),
+                    self.tables.opens.len(),
+                    self.tables.vars.len(),
+                );
+                self.tables
+                    .ns
+                    .extend(name.split('.').map(|s| s.to_string()));
+                let r = items.iter().try_for_each(|i| self.elab_item(i));
+                self.tables.ns.truncate(saved.0);
+                self.tables.opens.truncate(saved.1);
+                self.tables.vars.truncate(saved.2);
+                r
+            }
+            ItemKind::Section(items) => {
+                let saved = (self.tables.opens.len(), self.tables.vars.len());
+                let r = items.iter().try_for_each(|i| self.elab_item(i));
+                self.tables.opens.truncate(saved.0);
+                self.tables.vars.truncate(saved.1);
+                r
+            }
+            ItemKind::Open(name) => {
+                self.tables.opens.push(name.clone());
+                Ok(())
+            }
+            ItemKind::Variable(params) => {
+                self.tables.vars.extend(params.iter().cloned());
+                Ok(())
+            }
         }
+    }
+
+    /// The kernel-visible name of a declaration made in the current namespace.
+    fn qualified(&self, name: &Ident) -> Ident {
+        if self.tables.ns.is_empty() {
+            return name.clone();
+        }
+        Ident {
+            name: format!("{}.{}", self.tables.ns.join("."), name.name),
+            span: name.span,
+        }
+    }
+
+    /// The `variable`s of the enclosing sections that a declaration mentions.
+    fn used_vars(&self, mentions: &dyn Fn(&str) -> bool) -> Vec<Param> {
+        self.tables
+            .vars
+            .iter()
+            .filter(|v| mentions(&v.name.name))
+            .cloned()
+            .collect()
     }
 
     fn cx(&self) -> Cx<'_> {
@@ -505,6 +562,20 @@ impl Elaborator {
     }
 
     fn elab_fn(&mut self, f: &FnDecl, span: Span) -> R<()> {
+        let used = self.used_vars(&|v| {
+            f.params.iter().any(|p| mentions_expr(&p.ty, v))
+                || f.ret.as_ref().is_some_and(|r| mentions_expr(r, v))
+                || f.body.as_ref().is_some_and(|b| mentions_block(b, v))
+        });
+        if used.is_empty() {
+            return self.elab_fn_inner(f, span);
+        }
+        let mut g = f.clone();
+        g.params = used.into_iter().chain(g.params).collect();
+        self.elab_fn_inner(&g, span)
+    }
+
+    fn elab_fn_inner(&mut self, f: &FnDecl, span: Span) -> R<()> {
         let callee = callee_of(f, &[]).map_err(sig_error)?;
         let recursive = f
             .body
@@ -550,7 +621,8 @@ impl Elaborator {
                 }
             }
         };
-        let kname = self.add_def_named(&f.name, ty, val, mask)?;
+        let qname = self.qualified(&f.name);
+        let kname = self.add_def_named(&qname, ty, val, mask)?;
         self.tables.sigs.insert(kname, callee);
         Ok(())
     }
@@ -638,6 +710,25 @@ impl Elaborator {
     }
 
     fn elab_theorem(&mut self, t: &TheoremDecl, span: Span) -> R<()> {
+        let used = self.used_vars(&|v| {
+            t.params.iter().any(|p| mentions_expr(&p.ty, v))
+                || mentions_expr(&t.stmt, v)
+                || match &t.proof {
+                    Proof::Term(e) => mentions_expr(e, v),
+                    Proof::Tactic(toks) => toks
+                        .iter()
+                        .any(|tk| matches!(&tk.kind, apex_syntax::TokenKind::Ident(n) if n == v)),
+                }
+        });
+        if used.is_empty() {
+            return self.elab_theorem_inner(t, span);
+        }
+        let mut t2 = t.clone();
+        t2.params = used.into_iter().chain(t2.params).collect();
+        self.elab_theorem_inner(&t2, span)
+    }
+
+    fn elab_theorem_inner(&mut self, t: &TheoremDecl, span: Span) -> R<()> {
         let (ty, val, mask) = {
             let mut cx = self.cx();
             let (fvs, mask) = cx.elab_binders(&t.generics, &t.params)?;
@@ -656,7 +747,8 @@ impl Elaborator {
                 mask,
             )
         };
-        let kernel_name = self.add_def_named(&t.name, ty, val, mask)?;
+        let qname = self.qualified(&t.name);
+        let kernel_name = self.add_def_named(&qname, ty, val, mask)?;
         if t.simp {
             self.tables.simp.push(kernel_name);
         }
@@ -1414,13 +1506,33 @@ impl<'a> Cx<'a> {
         if let Some(i) = self.lookup_scope(name) {
             return Some(Res::Local(self.scope[i].1.clone()));
         }
-        if let Some(k) = self.tables.shadow.get(name) {
-            return Some(Res::Global(k.clone()));
+        for cand in self.name_candidates(name) {
+            if let Some(k) = self.tables.shadow.get(&cand) {
+                return Some(Res::Global(k.clone()));
+            }
+            if self.env.get(&cand).is_some() {
+                return Some(Res::Global(cand));
+            }
+            if let Some(full) = self.aliases.get(&cand) {
+                return Some(Res::Global(full.clone()));
+            }
         }
-        if self.env.get(name).is_some() {
-            return Some(Res::Global(name.to_string()));
+        None
+    }
+
+    /// The names a source name can stand for, best first: inside `namespace A.B`
+    /// `x` may be `A.B.x` or `A.x`, then names of `open`ed namespaces, then `x` itself.
+    fn name_candidates(&self, name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let ns = &self.tables.ns;
+        for i in (1..=ns.len()).rev() {
+            out.push(format!("{}.{name}", ns[..i].join(".")));
         }
-        self.aliases.get(name).map(|full| Res::Global(full.clone()))
+        for o in self.tables.opens.iter().rev() {
+            out.push(format!("{o}.{name}"));
+        }
+        out.push(name.to_string());
+        out
     }
 
     /// A constant applied to fresh universe level metavariables.
@@ -2831,12 +2943,13 @@ impl<'a> Cx<'a> {
     // ---- pattern matching ----
 
     fn global_ctor(&self, name: &str) -> Option<String> {
-        let full = self
-            .aliases
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| name.to_string());
-        matches!(self.env.get(&full), Some(Decl::Ctor(_))).then_some(full)
+        for cand in self.name_candidates(name) {
+            let full = self.aliases.get(&cand).cloned().unwrap_or(cand);
+            if matches!(self.env.get(&full), Some(Decl::Ctor(_))) {
+                return Some(full);
+            }
+        }
+        None
     }
 
     fn elab_pattern(&self, e: &Expr) -> R<Pat> {

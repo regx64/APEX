@@ -377,6 +377,39 @@ impl Parser {
         if simp && *self.peek() != T::Theorem {
             return self.err("`#[simp]` can only be applied to a theorem");
         }
+        let word = match self.peek() {
+            T::Ident(w) if matches!(w.as_str(), "namespace" | "open" | "section" | "variable") => {
+                Some(w.clone())
+            }
+            _ => None,
+        };
+        if let Some(w) = word {
+            self.bump();
+            let kind = match w.as_str() {
+                "namespace" => {
+                    let name = self.dotted_name()?;
+                    ItemKind::Namespace {
+                        name,
+                        items: self.item_block()?,
+                    }
+                }
+                "open" => {
+                    let name = self.dotted_name()?;
+                    self.eat(&T::Semi);
+                    ItemKind::Open(name)
+                }
+                "section" => ItemKind::Section(self.item_block()?),
+                _ => {
+                    let params = self.params()?;
+                    self.eat(&T::Semi);
+                    ItemKind::Variable(params)
+                }
+            };
+            return Ok(Item {
+                kind,
+                span: start.to(self.prev_span()),
+            });
+        }
         let kind = match self.peek() {
             T::Fn => ItemKind::Fn(self.fn_decl()?),
             T::Struct => ItemKind::Struct(self.struct_decl()?),
@@ -398,6 +431,28 @@ impl Parser {
             kind,
             span: start.to(self.prev_span()),
         })
+    }
+
+    fn dotted_name(&mut self) -> PResult<String> {
+        let mut name = self.ident()?.name;
+        while self.eat(&T::Dot) {
+            name.push('.');
+            name.push_str(&self.ident()?.name);
+        }
+        Ok(name)
+    }
+
+    fn item_block(&mut self) -> PResult<Vec<Item>> {
+        self.expect(&T::LBrace)?;
+        let mut items = Vec::new();
+        while *self.peek() != T::RBrace {
+            if *self.peek() == T::Eof {
+                return self.err("unclosed `{`");
+            }
+            items.push(self.item()?);
+        }
+        self.expect(&T::RBrace)?;
+        Ok(items)
     }
 
     fn generics(&mut self) -> PResult<Vec<Generic>> {
