@@ -1227,6 +1227,7 @@ impl<'a> Cx<'a> {
 
     // ---- induction and case analysis ----
 
+    #[allow(clippy::too_many_arguments)]
     fn t_induct(
         &mut self,
         st: &mut Tac,
