@@ -282,7 +282,7 @@ impl<'a> Evaluator<'a> {
         let Some(Decl::Rec(r)) = self.env.get(rec_name) else {
             return Err(format!("internal error: `{rec_name}` is not a recursor"));
         };
-        let major_idx = r.nparams + 1 + r.nminors + r.nindices;
+        let major_idx = r.nparams + r.nmotives + r.nminors + r.nindices;
         let major = self.force(&args[major_idx])?;
         let (rule, fields): (_, Vec<Value>) = match major {
             Value::Nat(n) => {
@@ -331,7 +331,7 @@ impl<'a> Evaluator<'a> {
             }
         };
         let mut cur = rv;
-        for a in &args[..r.nparams + 1 + r.nminors] {
+        for a in &args[..r.nparams + r.nmotives + r.nminors] {
             cur = self.apply(cur, a.clone())?;
         }
         for f in fields {
@@ -382,7 +382,10 @@ impl<'a> Evaluator<'a> {
                         fun(Kind::Ctor, arity)
                     }
                 }
-                Some(Decl::Rec(r)) => fun(Kind::Rec, r.nparams + 1 + r.nminors + r.nindices + 1),
+                Some(Decl::Rec(r)) => fun(
+                    Kind::Rec,
+                    r.nparams + r.nmotives + r.nminors + r.nindices + 1,
+                ),
                 Some(Decl::Inductive(_)) => Value::Erased,
                 Some(Decl::Axiom { .. }) => {
                     return Err(format!("the axiom `{name}` has no runtime value"))

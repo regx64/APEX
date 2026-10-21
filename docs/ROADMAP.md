@@ -4,7 +4,8 @@
 각 마일스톤은 테스트와 문서를 함께 커밋하고, 구현하지 못한 것은 문서에 "하지 않음"으로 남긴다.
 
 ## A. 커널 완성
-- [ ] A-1 상호 귀납형, 중첩 귀납형 (`List<Tree>` 같은 필드)
+- [x] A-1a 커널의 상호 귀납형 (`add_mutual`: 모티브/마이너 전체 공유, 재귀자별 ι-규칙; 테스트 `mutual_tree_forest_recursion_reduces`)
+- [ ] A-1b 표면 문법 `mutual { .. }`, 엘라보레이터/`match`/탭틱 지원, 중첩 귀납형 (`List<Tree>` 필드)
 - [ ] A-2 구조 η, 단위형 η
 - [ ] A-3 몫 `Quot` (mk/lift/ind/sound), 공리 `propext`, `Classical.choice`
 - [ ] A-4 인덱스 족 전체 (`induction`/`cases`가 인덱스를 다루도록)

@@ -464,3 +464,68 @@ fn instantiate_shifts_open_values_under_binders() {
         lam(Mult::Omega, sort(Level::zero()), c)
     );
 }
+
+#[test]
+fn mutual_tree_forest_recursion_reduces() {
+    use apex_kernel::{MutualDecl, TypeDecl};
+    let mut e = env();
+    let ty = || c("Tree");
+    let fo = || c("Forest");
+    e.add_mutual(MutualDecl {
+        lparams: vec![],
+        nparams: 0,
+        types: vec![
+            TypeDecl {
+                name: "Tree".into(),
+                ty: type_().build().unwrap(),
+                ctors: vec![("Tree.node".into(), arrow(fo(), ty()).build().unwrap())],
+            },
+            TypeDecl {
+                name: "Forest".into(),
+                ty: type_().build().unwrap(),
+                ctors: vec![
+                    ("Forest.nil".into(), fo().build().unwrap()),
+                    (
+                        "Forest.cons".into(),
+                        arrow(ty(), arrow(fo(), fo())).build().unwrap(),
+                    ),
+                ],
+            },
+        ],
+    })
+    .unwrap();
+    // size : Tree → Nat, counting nodes, by the recursor of Tree (motives for both types)
+    let motive = |t: Raw| lam_("_", t, nat());
+    let size = app_(
+        cl("Tree.rec", vec![Level::of_nat(1)]),
+        vec![
+            motive(ty()),
+            motive(fo()),
+            lam_("f", fo(), lam_("ih", nat(), succ(v("ih")))),
+            zero(),
+            lam_(
+                "t",
+                ty(),
+                lam_(
+                    "f",
+                    fo(),
+                    lam_("iht", nat(), lam_("ihf", nat(), add(v("iht"), v("ihf")))),
+                ),
+            ),
+        ],
+    );
+    let leaf = app_(c("Tree.node"), vec![c("Forest.nil")]);
+    let two = app_(
+        c("Tree.node"),
+        vec![app_(c("Forest.cons"), vec![leaf, c("Forest.nil")])],
+    );
+    e.add_def(
+        "size_two",
+        &[],
+        eq_nat(app_(size, vec![two]), succ(succ(zero())))
+            .build()
+            .unwrap(),
+        refl_nat(succ(succ(zero()))).build().unwrap(),
+    )
+    .unwrap();
+}

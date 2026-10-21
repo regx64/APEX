@@ -10,7 +10,7 @@ pub mod tc;
 pub mod term;
 
 pub use env::{kerr, Decl, Env, KResult, KernelError};
-pub use inductive::InductiveDecl;
+pub use inductive::{InductiveDecl, MutualDecl, TypeDecl};
 pub use level::Level;
 pub use tc::TypeChecker;
 pub use term::{Mult, Name, Term, T};

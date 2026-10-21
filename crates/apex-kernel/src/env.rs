@@ -59,6 +59,9 @@ pub struct RecInfo {
     pub ind: Name,
     pub nparams: usize,
     pub nindices: usize,
+    /// Number of motives: one per type of the mutual family.
+    pub nmotives: usize,
+    /// Number of minor premises: one per constructor of the whole family.
     pub nminors: usize,
     pub rules: Vec<RecRule>,
 }

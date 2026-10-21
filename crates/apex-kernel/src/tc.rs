@@ -447,7 +447,7 @@ impl<'a> TypeChecker<'a> {
             Some(Decl::Rec(r)) => r,
             _ => return Ok(None),
         };
-        let major_idx = r.nparams + 1 + r.nminors + r.nindices;
+        let major_idx = r.nparams + r.nmotives + r.nminors + r.nindices;
         if args.len() <= major_idx || r.lparams.len() != ls.len() {
             return Ok(None);
         }
@@ -472,7 +472,7 @@ impl<'a> TypeChecker<'a> {
             return Ok(None);
         }
         let rhs = instantiate_levels(&rule.rhs, &r.lparams, ls);
-        let mut res = mk_apps(&rhs, &args[..r.nparams + 1 + r.nminors]);
+        let mut res = mk_apps(&rhs, &args[..r.nparams + r.nmotives + r.nminors]);
         res = mk_apps(&res, &margs[nparams..]);
         res = mk_apps(&res, &args[major_idx + 1..]);
         Ok(Some(res))

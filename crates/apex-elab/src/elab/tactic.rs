@@ -1147,6 +1147,12 @@ impl<'a> Cx<'a> {
             Some(Decl::Rec(r)) => r.clone(),
             _ => return err(span, "internal error: missing recursor"),
         };
+        if rec_info.nmotives != 1 {
+            return err(
+                span,
+                format!("`{what}` on mutually inductive types is not supported yet"),
+            );
+        }
         let target = self.tc.zonk(&g.target);
         let lvl = self.sort_level_of(&target, span)?;
         let rec_levels: Vec<Level> = if rec_info.lparams.len() == info.lparams.len() + 1 {
