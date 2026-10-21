@@ -23,12 +23,14 @@
 - 선언: `fn struct enum trait impl theorem`. 파라미터는 `name: Type`, 선형 인자는 `own name: Type`, 메서드는 `&self` / `&mut self`.
 - 제네릭은 `<T, n: Nat, 'a>`. 타입 위치(`:`, `->` 뒤)에서 `<`는 제네릭 인자, 값 위치에서는 비교 연산자.
 - `=`는 명제적 동치, `==`는 불리언 동치. `let x := e;`로 바인딩.
-- 증명: `:= by { 탭틱... }` 또는 `:= 항`.
+- 증명: `:= by { 탭틱... }` 또는 `:= 항`. 탭틱은 docs/TACTICS.md.
 
 ## 예시
 ```apex
 theorem add_comm(a: Nat, b: Nat): a + b = b + a := by {
-    induction a
-    simp
+    induction b with {
+        zero => { simp },
+        succ(k, ih) => { simp [ih] },
+    }
 }
 ```

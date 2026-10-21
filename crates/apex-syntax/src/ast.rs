@@ -104,6 +104,8 @@ pub struct ImplDecl {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TheoremDecl {
+    /// `#[simp]`: `simp` uses this theorem as a rewrite rule.
+    pub simp: bool,
     pub name: Ident,
     pub generics: Vec<Generic>,
     pub params: Vec<Param>,
@@ -221,4 +223,56 @@ pub enum ExprKind {
     },
     If(Box<Expr>, Block, Option<Box<Expr>>),
     Match(Box<Expr>, Vec<Arm>),
+}
+
+/// A tactic in a `by { ... }` block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tactic {
+    pub kind: TacticKind,
+    pub span: Span,
+}
+
+/// A `ctor(a, b) => { tactics }` arm of `induction x with { .. }` / `cases x with { .. }`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaseArm {
+    pub ctor: Ident,
+    pub binders: Vec<Ident>,
+    pub body: Vec<Tactic>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TacticKind {
+    Intro(Vec<Ident>),
+    Exact(Expr),
+    Apply(Expr),
+    Rfl,
+    Assumption,
+    Constructor,
+    Left,
+    Right,
+    Exfalso,
+    Contradiction,
+    Symm,
+    Decide,
+    Omega,
+    Show(Expr),
+    Have {
+        name: Ident,
+        ty: Expr,
+        proof: HaveProof,
+    },
+    /// Rewrite rules; `true` means right-to-left (`<- h`).
+    Rw(Vec<(bool, Expr)>),
+    Simp(Vec<Expr>),
+    Unfold(Vec<Ident>),
+    Induction(Ident, Option<Vec<CaseArm>>),
+    Cases(Ident, Option<Vec<CaseArm>>),
+    /// `{ ... }`: run on the first goal, which it must close.
+    Block(Vec<Tactic>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HaveProof {
+    Term(Expr),
+    Tactic(Vec<Tactic>),
 }

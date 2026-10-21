@@ -30,6 +30,49 @@ pub fn parse(src: &str) -> PResult<Module> {
     .module()
 }
 
+/// Parse the tokens of a `by { ... }` block (without the braces).
+pub fn parse_tactics(toks: &[Token], end: Span) -> PResult<Vec<Tactic>> {
+    let mut toks = toks.to_vec();
+    toks.push(Token {
+        kind: T::Eof,
+        span: end,
+    });
+    let mut p = Parser {
+        toks,
+        pos: 0,
+        ty_mode: false,
+    };
+    let v = p.tactic_seq()?;
+    if *p.peek() != T::Eof {
+        return p.err(format!("unexpected {} in tactic block", p.peek()));
+    }
+    Ok(v)
+}
+
+/// Words that start a tactic; they cannot be used as binder names after `intro`.
+const TACTIC_WORDS: &[&str] = &[
+    "intro",
+    "exact",
+    "apply",
+    "rfl",
+    "assumption",
+    "constructor",
+    "left",
+    "right",
+    "exfalso",
+    "contradiction",
+    "symm",
+    "decide",
+    "omega",
+    "show",
+    "have",
+    "rw",
+    "simp",
+    "unfold",
+    "induction",
+    "cases",
+];
+
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
@@ -101,6 +144,168 @@ impl Parser {
         self.with_mode(false, |p| p.expr_bp(0))
     }
 
+    // ---- tactics ----
+
+    fn tactic_seq(&mut self) -> PResult<Vec<Tactic>> {
+        let mut out = Vec::new();
+        loop {
+            while self.eat(&T::Semi) {}
+            if matches!(self.peek(), T::Eof | T::RBrace) {
+                return Ok(out);
+            }
+            out.push(self.tactic()?);
+        }
+    }
+
+    fn tactic_block(&mut self) -> PResult<Vec<Tactic>> {
+        self.expect(&T::LBrace)?;
+        let v = self.tactic_seq()?;
+        self.expect(&T::RBrace)?;
+        Ok(v)
+    }
+
+    fn binder_names(&mut self) -> PResult<Vec<Ident>> {
+        let mut out = Vec::new();
+        loop {
+            match self.peek() {
+                T::Ident(n) if !TACTIC_WORDS.contains(&n.as_str()) => out.push(self.ident()?),
+                T::Underscore => {
+                    let span = self.bump().span;
+                    out.push(Ident {
+                        name: "_".into(),
+                        span,
+                    });
+                }
+                _ => return Ok(out),
+            }
+        }
+    }
+
+    fn case_arms(&mut self) -> PResult<Option<Vec<CaseArm>>> {
+        match self.peek() {
+            T::Ident(w) if w == "with" => {
+                self.bump();
+            }
+            _ => return Ok(None),
+        }
+        self.expect(&T::LBrace)?;
+        let mut arms = Vec::new();
+        while *self.peek() != T::RBrace {
+            let ctor = self.ident()?;
+            let mut binders = Vec::new();
+            if self.eat(&T::LParen) {
+                while *self.peek() != T::RParen {
+                    binders.extend(self.binder_names()?);
+                    if !self.eat(&T::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&T::RParen)?;
+            }
+            self.expect(&T::FatArrow)?;
+            let body = self.tactic_block()?;
+            arms.push(CaseArm {
+                ctor,
+                binders,
+                body,
+            });
+            self.eat(&T::Comma);
+        }
+        self.expect(&T::RBrace)?;
+        Ok(Some(arms))
+    }
+
+    fn tactic(&mut self) -> PResult<Tactic> {
+        use TacticKind as K;
+        let start = self.span();
+        if *self.peek() == T::LBrace {
+            let body = self.tactic_block()?;
+            return Ok(Tactic {
+                kind: K::Block(body),
+                span: start.to(self.prev_span()),
+            });
+        }
+        let word = match self.peek().clone() {
+            T::Ident(w) if TACTIC_WORDS.contains(&w.as_str()) => w,
+            other => return self.err(format!("expected a tactic, found {other}")),
+        };
+        self.bump();
+        let kind = match word.as_str() {
+            "intro" => K::Intro(self.binder_names()?),
+            "exact" => K::Exact(self.expr()?),
+            "apply" => K::Apply(self.expr()?),
+            "rfl" => K::Rfl,
+            "assumption" => K::Assumption,
+            "constructor" => K::Constructor,
+            "left" => K::Left,
+            "right" => K::Right,
+            "exfalso" => K::Exfalso,
+            "contradiction" => K::Contradiction,
+            "symm" => K::Symm,
+            "decide" => K::Decide,
+            "omega" => K::Omega,
+            "show" => K::Show(self.ty()?),
+            "have" => {
+                let name = self.ident()?;
+                self.expect(&T::Colon)?;
+                let ty = self.ty()?;
+                self.expect(&T::ColonEq)?;
+                let proof = if self.eat(&T::By) {
+                    HaveProof::Tactic(self.tactic_block()?)
+                } else {
+                    HaveProof::Term(self.expr()?)
+                };
+                K::Have { name, ty, proof }
+            }
+            "rw" => {
+                self.expect(&T::LBracket)?;
+                let mut rules = Vec::new();
+                while *self.peek() != T::RBracket {
+                    let rev = self.eat(&T::LArrow);
+                    rules.push((rev, self.expr()?));
+                    if !self.eat(&T::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&T::RBracket)?;
+                K::Rw(rules)
+            }
+            "simp" => {
+                let mut lemmas = Vec::new();
+                if self.eat(&T::LBracket) {
+                    while *self.peek() != T::RBracket {
+                        lemmas.push(self.expr()?);
+                        if !self.eat(&T::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&T::RBracket)?;
+                }
+                K::Simp(lemmas)
+            }
+            "unfold" => {
+                let names = self.binder_names()?;
+                if names.is_empty() {
+                    return self.err("`unfold` needs at least one name");
+                }
+                K::Unfold(names)
+            }
+            "induction" => {
+                let v = self.ident()?;
+                K::Induction(v, self.case_arms()?)
+            }
+            "cases" => {
+                let v = self.ident()?;
+                K::Cases(v, self.case_arms()?)
+            }
+            _ => unreachable!("every tactic word is handled"),
+        };
+        Ok(Tactic {
+            kind,
+            span: start.to(self.prev_span()),
+        })
+    }
+
     fn ident(&mut self) -> PResult<Ident> {
         match self.peek().clone() {
             T::Ident(name) => Ok(Ident {
@@ -123,13 +328,35 @@ impl Parser {
 
     fn item(&mut self) -> PResult<Item> {
         let start = self.span();
+        let mut simp = false;
+        while self.eat(&T::Hash) {
+            self.expect(&T::LBracket)?;
+            let attr = self.ident()?;
+            match attr.name.as_str() {
+                "simp" => simp = true,
+                other => {
+                    return Err(ParseError {
+                        msg: format!("unknown attribute `{other}` (expected `simp`)"),
+                        span: attr.span,
+                    })
+                }
+            }
+            self.expect(&T::RBracket)?;
+        }
+        if simp && *self.peek() != T::Theorem {
+            return self.err("`#[simp]` can only be applied to a theorem");
+        }
         let kind = match self.peek() {
             T::Fn => ItemKind::Fn(self.fn_decl()?),
             T::Struct => ItemKind::Struct(self.struct_decl()?),
             T::Enum => ItemKind::Enum(self.enum_decl()?),
             T::Trait => ItemKind::Trait(self.trait_decl()?),
             T::Impl => ItemKind::Impl(self.impl_decl()?),
-            T::Theorem => ItemKind::Theorem(self.theorem_decl()?),
+            T::Theorem => {
+                let mut t = self.theorem_decl()?;
+                t.simp = simp;
+                ItemKind::Theorem(t)
+            }
             other => {
                 return self.err(format!(
                     "expected an item (`fn`, `struct`, `enum`, `trait`, `impl` or `theorem`), found {other}"
@@ -405,6 +632,7 @@ impl Parser {
             Proof::Term(self.expr()?)
         };
         Ok(TheoremDecl {
+            simp: false,
             name,
             generics,
             params,
@@ -837,6 +1065,58 @@ mod tests {
             t.fns[0].params[0].ty.kind,
             ExprKind::Ref { mutable: true, .. }
         ));
+    }
+
+    fn tactics(src: &str) -> Vec<Tactic> {
+        let toks = lex(src).unwrap();
+        let toks = &toks[..toks.len() - 1]; // drop Eof
+        parse_tactics(toks, Span::new(0, 0)).unwrap()
+    }
+
+    #[test]
+    fn tactic_syntax() {
+        use TacticKind as K;
+        let ts = tactics("intro a b; rw [h, <- g]\n simp [ih]\n exact foo(a)\n rfl");
+        assert!(matches!(&ts[0].kind, K::Intro(v) if v.len() == 2));
+        assert!(matches!(&ts[1].kind, K::Rw(r) if r.len() == 2 && !r[0].0 && r[1].0));
+        assert!(matches!(&ts[2].kind, K::Simp(l) if l.len() == 1));
+        assert!(matches!(&ts[3].kind, K::Exact(_)));
+        assert!(matches!(&ts[4].kind, K::Rfl));
+        let ts = tactics("induction n with { zero => { rfl }, succ(m, ih) => { simp [ih] } }");
+        let K::Induction(v, Some(arms)) = &ts[0].kind else {
+            panic!()
+        };
+        assert_eq!(v.name, "n");
+        assert_eq!(arms.len(), 2);
+        assert_eq!(arms[1].binders.len(), 2);
+        let ts = tactics("have h: a = b := by { rfl }\n { exact h }");
+        assert!(matches!(
+            &ts[0].kind,
+            K::Have {
+                proof: HaveProof::Tactic(_),
+                ..
+            }
+        ));
+        assert!(matches!(&ts[1].kind, K::Block(_)));
+    }
+
+    #[test]
+    fn tactic_errors() {
+        let toks = lex("frobnicate").unwrap();
+        let toks = &toks[..toks.len() - 1];
+        let e = parse_tactics(toks, Span::new(0, 0)).unwrap_err();
+        assert!(e.msg.contains("expected a tactic"));
+    }
+
+    #[test]
+    fn simp_attribute() {
+        let m = ok("#[simp]\ntheorem t(a: Nat): a = a := rfl");
+        let ItemKind::Theorem(t) = &m.items[0].kind else {
+            panic!()
+        };
+        assert!(t.simp);
+        assert!(parse("#[inline] theorem t(a: Nat): a = a := rfl").is_err());
+        assert!(parse("#[simp] fn f() {}").is_err());
     }
 
     #[test]

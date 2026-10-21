@@ -220,3 +220,85 @@ fn list_items<T: Show>(xs: List<T>) -> String {
 impl<T: Show> Show for List<T> {
     fn show(&self) -> String { String.append("[", String.append(list_items(self), "]")) }
 }
+
+// ---- theorem library: facts about Nat arithmetic, proved with tactics ----
+// Theorems marked #[simp] are the default rewrite rules of the `simp` tactic.
+
+#[simp]
+theorem add_zero(n: Nat): n + 0 = n := by { rfl }
+
+#[simp]
+theorem add_succ(n: Nat, m: Nat): n + Nat.succ(m) = Nat.succ(n + m) := by { rfl }
+
+#[simp]
+theorem zero_add(n: Nat): 0 + n = n := by {
+    induction n with {
+        zero => { rfl },
+        succ(m, ih) => { simp [ih] },
+    }
+}
+
+#[simp]
+theorem succ_add(n: Nat, m: Nat): Nat.succ(n) + m = Nat.succ(n + m) := by {
+    induction m with {
+        zero => { rfl },
+        succ(k, ih) => { simp [ih] },
+    }
+}
+
+theorem add_comm(a: Nat, b: Nat): a + b = b + a := by {
+    induction b with {
+        zero => { simp },
+        succ(k, ih) => { simp [ih] },
+    }
+}
+
+theorem add_assoc(a: Nat, b: Nat, c: Nat): (a + b) + c = a + (b + c) := by {
+    induction c with {
+        zero => { rfl },
+        succ(k, ih) => { simp [ih] },
+    }
+}
+
+#[simp]
+theorem mul_zero(n: Nat): n * 0 = 0 := by { rfl }
+
+#[simp]
+theorem mul_succ(n: Nat, m: Nat): n * Nat.succ(m) = n * m + n := by { rfl }
+
+#[simp]
+theorem zero_mul(n: Nat): 0 * n = 0 := by {
+    induction n with {
+        zero => { rfl },
+        succ(m, ih) => { simp [ih] },
+    }
+}
+
+#[simp]
+theorem succ_mul(n: Nat, m: Nat): Nat.succ(n) * m = n * m + m := by {
+    induction m with {
+        zero => { rfl },
+        succ(k, ih) => {
+            simp [ih];
+            rw [add_assoc, add_assoc, add_comm(k, n)]
+        },
+    }
+}
+
+#[simp]
+theorem mul_one(n: Nat): n * 1 = n := by { simp }
+
+#[simp]
+theorem one_mul(n: Nat): 1 * n = n := by {
+    induction n with {
+        zero => { rfl },
+        succ(m, ih) => { simp [ih] },
+    }
+}
+
+theorem mul_comm(a: Nat, b: Nat): a * b = b * a := by {
+    induction b with {
+        zero => { simp },
+        succ(k, ih) => { simp [ih] },
+    }
+}

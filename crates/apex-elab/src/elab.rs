@@ -29,6 +29,8 @@ impl ElabError {
     }
 }
 
+mod tactic;
+
 type R<X> = Result<X, ElabError>;
 
 fn err<X>(span: Span, msg: impl Into<String>) -> R<X> {
@@ -329,6 +331,8 @@ struct Tables {
     structs: HashMap<String, StructMeta>,
     /// How each function takes its arguments (`&`, `&mut`, `own`), by kernel name.
     sigs: HashMap<String, Callee>,
+    /// Theorems marked `#[simp]`, in declaration order (kernel names).
+    simp: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -594,7 +598,11 @@ impl Elaborator {
             let stmt = cx.elab_type(&t.stmt)?;
             let proof = match &t.proof {
                 Proof::Term(e) => cx.elab_check(e, &stmt)?,
-                Proof::Tactic(_) => return err(span, "tactic proofs are not implemented yet (M6)"),
+                Proof::Tactic(toks) => {
+                    let tacs = apex_syntax::parse_tactics(toks, span)
+                        .map_err(|e| ElabError::new(e.span, e.msg))?;
+                    cx.prove(&stmt, &tacs, span)?
+                }
             };
             (
                 cx.close(&fvs, &stmt, true, span)?,
@@ -602,7 +610,11 @@ impl Elaborator {
                 mask,
             )
         };
-        self.add_def(&t.name, ty, val, mask)
+        let kernel_name = self.add_def_named(&t.name, ty, val, mask)?;
+        if t.simp {
+            self.tables.simp.push(kernel_name);
+        }
+        Ok(())
     }
 
     /// The type of an inductive type former: `Π params, Sort level`.

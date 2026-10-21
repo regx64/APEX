@@ -2,6 +2,6 @@
 Advanced Proof & Expression Language — Lean식 의존 타입·증명과 Rust식 소유권을 결합한 언어.
 
 - 계획: [docs/PLAN.md](docs/PLAN.md), 명세 초안: [docs/SPEC.md](docs/SPEC.md)
-- 현재: 기반 정리 완료 (커널, 엘라보레이터, match, 재귀, 트레잇, 클로저, 리스트, 인터프리터, String/IO). 소유권과 빌림 검사(M5)까지 완료. `cargo run -p apex-driver -- run tests/run/lists.apex`. `cargo run -p apex-driver -- check tests/ui/check/ok/recursion.apex`. 설계: [docs/KERNEL.md](docs/KERNEL.md). `cargo run -p apex-driver -- parse tests/ui/ok/items.apex`
+- 현재: 기반 정리 완료 (커널, 엘라보레이터, match, 재귀, 트레잇, 클로저, 리스트, 인터프리터, String/IO). 소유권과 빌림 검사(M5), 탭틱 증명(M6, [docs/TACTICS.md](docs/TACTICS.md))까지 완료. `cargo run -p apex-driver -- run tests/run/lists.apex`. `cargo run -p apex-driver -- check tests/ui/check/ok/recursion.apex`. 설계: [docs/KERNEL.md](docs/KERNEL.md). `cargo run -p apex-driver -- parse tests/ui/ok/items.apex`
 
 설계 문서: [KERNEL](docs/KERNEL.md), [ELAB](docs/ELAB.md), [EVAL](docs/EVAL.md), [OWNERSHIP](docs/OWNERSHIP.md)

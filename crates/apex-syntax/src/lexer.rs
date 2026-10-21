@@ -58,6 +58,7 @@ pub enum TokenKind {
     Lt,
     Gt,
     Bar,
+    Hash,
     Underscore,
     Eof,
 }
@@ -244,6 +245,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 (b'<', _) => (Lt, 1),
                 (b'>', _) => (Gt, 1),
                 (b'|', _) => (Bar, 1),
+                (b'#', _) => (Hash, 1),
                 _ => {
                     let ch = src[i..].chars().next().unwrap();
                     return Err(LexError {
@@ -323,6 +325,7 @@ impl std::fmt::Display for TokenKind {
             Lt => "`<`",
             Gt => "`>`",
             Bar => "`|`",
+            Hash => "`#`",
             Underscore => "`_`",
         };
         f.write_str(s)
@@ -378,6 +381,6 @@ mod tests {
     fn errors() {
         assert!(lex("\"abc").is_err());
         assert!(lex("/* x").is_err());
-        assert!(lex("#").is_err());
+        assert!(lex("$").is_err());
     }
 }
