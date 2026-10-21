@@ -1,5 +1,8 @@
 # APEX 로드맵: Lean 전체를 향해
 
+**방향 (확정): 증명/수학 중심, Lean 노선.** 소유권/빌림 검사(M5)는 이미 있는 부가 기능으로 동결하고
+더 확장하지 않는다. 시스템 언어 쪽(네이티브 백엔드, Drop, 정제 타입)은 Lean 쪽이 갖춰진 뒤에 다시 본다.
+
 목표는 Lean 4의 기능 전체다. 끝이 있는 목표가 아니므로 의존 순서대로 마일스톤을 쌓는다.
 각 마일스톤은 테스트와 문서를 함께 커밋하고, 구현하지 못한 것은 문서에 "하지 않음"으로 남긴다.
 
@@ -12,7 +15,8 @@
 - [ ] A-5 `Nat`/`Int`/`String` 리터럴 가속(GMP급), 독립 검증기
 
 ## B. 엘라보레이터
-- [ ] B-1 잘 정초된 재귀 + `termination_by`/`decreasing_by`
+- [ ] B-1a 구조적 재귀의 일반화: `T.below`/`T.brecOn` 생성 + 임의 깊이 하위 항 재귀 (`fib(m)+fib(m+1)`)
+- [ ] B-1b 잘 정초된 재귀 + `termination_by`/`decreasing_by` (`Acc`, `WellFounded.fix`; `omega` 필요)
 - [ ] B-2 종속 패턴 매칭 (motive 일반화, 인덱스 족 `match`)
 - [ ] B-3 `namespace`/`open`/`section`/`variable`/`universe`
 - [ ] B-4 `structure` 상속, `class` 완전판(출력 매개변수, 기본 인스턴스), `deriving`
