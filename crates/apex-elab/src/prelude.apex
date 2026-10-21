@@ -78,8 +78,16 @@ fn nat_div(a: Nat, b: Nat) -> Nat {
     if nat_is_zero(b) { 0 } else { nat_div_aux(Nat.succ(a), a, b) }
 }
 
+// The remainder by repeated subtraction (fuel: `a + 1` steps always suffice). `a % 0` is `a`.
+fn nat_rem_aux(fuel: Nat, a: Nat, b: Nat) -> Nat {
+    match fuel {
+        0 => a,
+        Nat.succ(f) => if nat_lt(a, b) { a } else { nat_rem_aux(f, nat_sub(a, b), b) },
+    }
+}
+
 fn nat_rem(a: Nat, b: Nat) -> Nat {
-    if nat_is_zero(b) { a } else { nat_sub(a, Nat.mul(nat_div(a, b), b)) }
+    if nat_is_zero(b) { a } else { nat_rem_aux(Nat.succ(a), a, b) }
 }
 
 // ---- operator traits ----

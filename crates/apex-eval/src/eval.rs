@@ -265,6 +265,26 @@ impl<'a> Evaluator<'a> {
                     let name = if r { "Bool.true" } else { "Bool.false" };
                     Ok(Value::Ctor(name.into(), Rc::new(vec![])))
                 }
+                "WellFounded.fix" => {
+                    let ih = Value::Fun(
+                        Rc::new(FunInfo {
+                            kind: Kind::Prim,
+                            name: "WellFounded.fix.ih".into(),
+                            arity: 7,
+                        }),
+                        Rc::new(args[..5].to_vec()),
+                    );
+                    let step = self.apply(args[4].clone(), args[5].clone())?;
+                    self.apply(step, ih)
+                }
+                "WellFounded.fix.ih" => {
+                    let fix = FunInfo {
+                        kind: Kind::Prim,
+                        name: "WellFounded.fix".into(),
+                        arity: 6,
+                    };
+                    self.exec(&fix, args[..6].to_vec())
+                }
                 "Quot.mk" => self.force(&args[2]),
                 "Quot.lift" => {
                     let f = self.force(&args[3])?;
@@ -372,6 +392,10 @@ impl<'a> Evaluator<'a> {
             "String.append" => fun(Kind::Prim, 2),
             "Nat.toString" => fun(Kind::Prim, 1),
             // quotients: `Quot.mk α r a` is `a`; `Quot.lift α r β f h q` is `f q`
+            // well-founded recursion runs as a plain fixpoint:
+            //   fix α r C hwf F x = F x (fun y pf => fix α r C hwf F y)
+            "WellFounded.fix" => fun(Kind::Prim, 6),
+            "WellFounded.fix.ih" => fun(Kind::Prim, 7),
             "Quot.mk" => fun(Kind::Prim, 3),
             "Quot.lift" => fun(Kind::Prim, 6),
             "IO.pure" => fun(Kind::Prim, 2),

@@ -489,6 +489,52 @@ impl<'a> Cx<'a> {
                         span,
                     )?));
                 }
+                ("Eq", 3) if matches!(&*args[0], Term::Const(m, _) if &**m == "Bool") => {
+                    // `nat_lt a b = true/false`, `nat_beq a b = true/false`: what `<` and `==`
+                    // conditions of an `if` give
+                    let lhs = self.tc.zonk(&args[1]);
+                    let (lh, largs) = app_spine(&lhs);
+                    let truth = match &*args[2] {
+                        Term::Const(m, _) if &**m == "Bool.true" => Some(true),
+                        Term::Const(m, _) if &**m == "Bool.false" => Some(false),
+                        _ => None,
+                    };
+                    if let (Term::Const(f, _), 2, Some(truth)) = (&*lh, largs.len(), truth) {
+                        let (a, b) = (largs[0].clone(), largs[1].clone());
+                        let derived = match (&**f, truth) {
+                            ("nat_lt", true) => Some((
+                                mk_apps(&c("lt"), &[a.clone(), b.clone()]),
+                                mk_apps(&c("lt_sound"), &[a, b, v.clone()]),
+                            )),
+                            ("nat_lt", false) => Some((
+                                mk_apps(&c("le"), &[b.clone(), a.clone()]),
+                                mk_apps(&c("lt_false_le"), &[a, b, v.clone()]),
+                            )),
+                            ("nat_beq", true) => Some((
+                                mk_apps(
+                                    &cnst("Eq".into(), vec![Level::of_nat(1)]),
+                                    &[nat(), a.clone(), b.clone()],
+                                ),
+                                mk_apps(&c("beq_sound"), &[a, b, v.clone()]),
+                            )),
+                            ("nat_beq", false) => Some((
+                                app(
+                                    c("Not"),
+                                    mk_apps(
+                                        &cnst("Eq".into(), vec![Level::of_nat(1)]),
+                                        &[nat(), a.clone(), b.clone()],
+                                    ),
+                                ),
+                                mk_apps(&c("beq_false_ne"), &[a, b, v.clone()]),
+                            )),
+                            _ => None,
+                        };
+                        if let Some((prop, pf)) = derived {
+                            os.done_hyps.insert(*id);
+                            return Ok(Some(vec![self.add_hyp(st, g, "cond", prop, pf)]));
+                        }
+                    }
+                }
                 ("Not", 1) => {
                     let inner = self.tc.zonk(&args[0]);
                     let (ih, iargs) = app_spine(&inner);

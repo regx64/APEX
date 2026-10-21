@@ -443,6 +443,29 @@ impl Parser {
         })
     }
 
+    /// The tokens between a `{` and its matching `}` (tactic blocks are parsed later).
+    fn raw_braced_tokens(&mut self) -> PResult<Vec<Token>> {
+        self.expect(&T::LBrace)?;
+        let mut depth = 1;
+        let mut toks = Vec::new();
+        loop {
+            match self.peek() {
+                T::LBrace => depth += 1,
+                T::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                T::Eof => return self.err("unclosed `{` in tactic block"),
+                _ => {}
+            }
+            toks.push(self.bump());
+        }
+        self.expect(&T::RBrace)?;
+        Ok(toks)
+    }
+
     fn dotted_name(&mut self) -> PResult<String> {
         let mut name = self.ident()?.name;
         while self.eat(&T::Dot) {
@@ -580,6 +603,20 @@ impl Parser {
         } else {
             None
         };
+        let mut wf = None;
+        if matches!(self.peek(), T::Ident(w) if w == "termination_by") {
+            self.bump();
+            let measure = self.expr()?;
+            let mut decreasing = None;
+            if matches!(self.peek(), T::Ident(w) if w == "decreasing_by") {
+                self.bump();
+                decreasing = Some(self.raw_braced_tokens()?);
+            }
+            wf = Some(WfSpec {
+                measure,
+                decreasing,
+            });
+        }
         let body = if *self.peek() == T::LBrace {
             Some(self.block()?)
         } else {
@@ -592,6 +629,7 @@ impl Parser {
             params,
             ret,
             body,
+            wf,
         })
     }
 
@@ -705,25 +743,7 @@ impl Parser {
         let stmt = self.ty()?;
         self.expect(&T::ColonEq)?;
         let proof = if self.eat(&T::By) {
-            self.expect(&T::LBrace)?;
-            let mut depth = 1;
-            let mut toks = Vec::new();
-            loop {
-                match self.peek() {
-                    T::LBrace => depth += 1,
-                    T::RBrace => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    T::Eof => return self.err("unclosed `{` in tactic block"),
-                    _ => {}
-                }
-                toks.push(self.bump());
-            }
-            self.expect(&T::RBrace)?;
-            Proof::Tactic(toks)
+            Proof::Tactic(self.raw_braced_tokens()?)
         } else {
             Proof::Term(self.expr()?)
         };

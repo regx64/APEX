@@ -30,6 +30,7 @@ impl ElabError {
 }
 
 mod tactic;
+mod wf;
 
 type R<X> = Result<X, ElabError>;
 
@@ -417,6 +418,12 @@ impl Elaborator {
             ("Classical.choice", vec![Imp, Exp]),
             ("Nonempty", vec![Exp]),
             ("Nonempty.intro", vec![Imp, Exp]),
+            ("Acc", vec![Imp, Exp, Exp]),
+            ("Acc.intro", vec![Imp, Imp, Exp, Exp]),
+            ("Acc.fix", vec![Imp, Imp, Imp, Exp, Exp, Exp]),
+            ("WellFounded", vec![Imp, Exp]),
+            ("WellFounded.fix", vec![Imp, Imp, Imp, Exp, Exp, Exp]),
+            ("WellFounded.fix_eq", vec![Imp, Imp, Imp, Exp, Exp, Exp]),
             ("Exists", vec![Imp, Exp]),
             ("Exists.intro", vec![Imp, Imp, Exp, Exp]),
         ] {
@@ -598,6 +605,9 @@ impl Elaborator {
                 "a recursive function cannot have `&mut` parameters yet",
             );
         }
+        if recursive && f.wf.is_some() {
+            return self.elab_wf_fn(f, span);
+        }
         let (ty, val, mask) = if !recursive {
             self.try_fn(f, span, None, false, None)?
         } else {
@@ -624,6 +634,24 @@ impl Elaborator {
             }
             match found {
                 Some(r) => r,
+                // not structural: try a parameter as a `Nat` measure with `omega`
+                None if f.params.iter().any(|p| !p.name.name.is_empty()) => {
+                    return self.elab_wf_fn(f, span).map_err(|wf_err| {
+                        // report the structural failure, and why well-founded recursion failed
+                        match first_err.clone() {
+                            Some(mut e) => {
+                                let why = wf_err.msg.lines().next().unwrap_or("").to_string();
+                                e.msg = format!(
+                                    "{}\nhelp: nor is it provably terminating on a parameter ({why}); \
+                                     add `termination_by <measure>` (and `decreasing_by {{ .. }}`)",
+                                    e.msg
+                                );
+                                e
+                            }
+                            None => wf_err,
+                        }
+                    });
+                }
                 None => {
                     return Err(first_err.unwrap_or(ElabError::new(
                         f.name.span,
@@ -679,6 +707,7 @@ impl Elaborator {
                 refined: Vec::new(),
                 in_top: false,
                 deep: None,
+                wf: None,
             });
         }
         let ret = match &f.ret {
@@ -1245,6 +1274,7 @@ impl Elaborator {
                 params: f.params.clone(),
                 ret: f.ret.clone(),
                 body: f.body.clone(),
+                wf: None,
             };
             let callee = callee_of(&fd, &[]).map_err(sig_error)?;
             let (ty, val, mask) = self.try_fn(&fd, span, None, false, Some(&d.self_ty))?;
@@ -1283,6 +1313,8 @@ struct RecCtx {
     in_top: bool,
     /// Course-of-values mode (`brecOn`), for recursion on deeper subterms.
     deep: Option<Deep>,
+    /// Well-founded recursion (`termination_by`).
+    wf: Option<wf::WfCtx>,
 }
 
 /// State of a function compiled through `I.brecOn`: every recursive field in scope
@@ -1345,6 +1377,8 @@ struct Cx<'a> {
     outer_lifetimes: Vec<String>,
     /// Where each metavariable was created, for "cannot infer" errors.
     spans: HashMap<u32, Span>,
+    /// `if` branches get the condition as a hypothesis (needed by `decreasing_by`).
+    dep_if: bool,
 }
 
 fn path_name(e: &Expr) -> Option<String> {
@@ -1377,6 +1411,7 @@ impl<'a> Cx<'a> {
             shared_refs: Vec::new(),
             outer_lifetimes: Vec::new(),
             spans: HashMap::new(),
+            dep_if: false,
         }
     }
 
@@ -3519,6 +3554,9 @@ impl<'a> Cx<'a> {
     /// `f(args)` inside the body of a structurally recursive `f`: becomes the
     /// induction hypothesis of the matched parameter's field.
     fn elab_rec_call(&mut self, args: &[Expr], exp: Option<&T>, span: Span) -> R<T> {
+        if let Some(wf) = self.rec.as_ref().and_then(|rc| rc.wf.clone()) {
+            return self.elab_wf_call(wf, args, exp, span);
+        }
         let rc = self.rec.as_ref().expect("recursion context");
         let (decr, explicit) = (rc.decr, rc.explicit.clone());
         if args.len() != explicit.len() {
@@ -3589,21 +3627,52 @@ impl<'a> Cx<'a> {
             // (in a `do` statement the variables were already threaded through the
             // branches by the desugaring in `do_stmts`; here they are only restored)
             let saved = self.state_terms(&vars);
-            let then_t = self.scoped(|cx| then_branch(cx, exp))?;
+            // with `dep_if`, each branch sees the condition as a hypothesis `c = true/false`
+            let hyps = if self.dep_if {
+                let bool_t = cnst("Bool".into(), vec![]);
+                let eq = |b: &str| {
+                    mk_apps(
+                        &cnst("Eq".into(), vec![Level::of_nat(1)]),
+                        &[bool_t.clone(), c.clone(), cnst(b.into(), vec![])],
+                    )
+                };
+                let (tt, ft) = (eq("Bool.true"), eq("Bool.false"));
+                Some((
+                    self.tc.fresh("hc", tt, Mult::Omega),
+                    self.tc.fresh("hc", ft, Mult::Omega),
+                ))
+            } else {
+                None
+            };
+            let depth = self.scope.len();
+            if let Some((ht, _)) = hyps {
+                self.scope.push(("_hc".into(), fvar(ht)));
+            }
+            let then_t = self.scoped(|cx| then_branch(cx, exp));
+            self.scope.truncate(depth);
+            let then_t = then_t?;
             self.restore_state(&vars, &saved);
             let ty = match exp {
                 Some(t) => t.clone(),
                 None => from_kernel(self.tc.infer(&then_t), then.span)?,
             };
             let then_t = self.coerce(then_t, &ty, then.span)?;
+            if let Some((_, hf)) = hyps {
+                self.scope.push(("_hc".into(), fvar(hf)));
+            }
             let else_t = match els {
-                Some(e) => self.scoped(|cx| else_branch(cx, e, &ty))?,
+                Some(e) => self.scoped(|cx| else_branch(cx, e, &ty)),
                 None => {
                     let u = self.unit_branch(&ty, do_mode);
-                    self.coerce(u, &ty, span)?
+                    self.coerce(u, &ty, span)
                 }
             };
+            self.scope.truncate(depth);
+            let else_t = else_t?;
             self.restore_state(&vars, &saved);
+            if let Some((ht, hf)) = hyps {
+                return self.build_dep_if(c, &ty, then_t, else_t, (ht, hf), span);
+            }
             return self.build_if(c, &ty, then_t, else_t, span);
         }
         // mutable variables are in scope: each branch returns its value together
@@ -3654,6 +3723,38 @@ impl<'a> Cx<'a> {
     }
 
     /// `Bool.rec (fun _ => ty) else_case then_case c`
+    /// `if` with the condition as a hypothesis in each branch:
+    /// `Bool.rec (fun b => c = b → ty) (fun h => else) (fun h => then) c rfl`.
+    fn build_dep_if(
+        &mut self,
+        c: T,
+        ty: &T,
+        then_t: T,
+        else_t: T,
+        (ht, hf): (u32, u32),
+        span: Span,
+    ) -> R<T> {
+        let bool_ty = cnst("Bool".into(), vec![]);
+        self.tc.zonk_locals();
+        let ty = self.tc.zonk(ty);
+        let lvl = from_kernel(self.tc.check_is_type(&ty), span)?;
+        let lvl = self.tc.zonk_level(&lvl);
+        let c = self.tc.zonk(&c);
+        let eq_c_b = mk_apps(
+            &cnst("Eq".into(), vec![Level::of_nat(1)]),
+            &[bool_ty.clone(), c.clone(), bvar(0)],
+        );
+        let motive = lam(Mult::Omega, bool_ty.clone(), pi(Mult::Omega, eq_c_b, ty));
+        let then_l = self.tc.mk_lam(&[ht], &self.tc.zonk(&then_t));
+        let else_l = self.tc.mk_lam(&[hf], &self.tc.zonk(&else_t));
+        let refl = mk_apps(
+            &cnst("Eq.refl".into(), vec![Level::of_nat(1)]),
+            &[bool_ty, c.clone()],
+        );
+        let rec = cnst("Bool.rec".into(), vec![lvl]);
+        Ok(mk_apps(&rec, &[motive, else_l, then_l, c, refl]))
+    }
+
     fn build_if(&mut self, c: T, ty: &T, then_t: T, else_t: T, span: Span) -> R<T> {
         let bool_ty = cnst("Bool".into(), vec![]);
         let ty = self.tc.zonk(ty);

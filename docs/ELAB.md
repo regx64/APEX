@@ -129,3 +129,16 @@ M5 (소유권, 빌림 검사).
    각 분기에서 `b`의 `PProd` 성분(`fst`=재귀 결과, `snd`=그 필드의 below)을 꺼내 재귀 필드에 등록한다.
    그래서 `fib(m) + fib(m+1)`처럼 임의 깊이의 하위 항을 부를 수 있고, 항은 여전히 `rfl`/`decide`로 계산된다.
    `T.below`/`T.brecOn`은 커널이 귀납형마다 만드는 평범한 정의라서 신뢰 대상이 아니다.
+
+## 잘 정초된 재귀
+
+`fn f(..) -> R termination_by m(..) decreasing_by { 탭틱 } { 본문 }` (docs/ROADMAP B-1b). 구조적 재귀가 안 되고 `termination_by`가 없으면
+각 매개변수를 측도로 시도한다. 정의는 `Nat`과 `lt` 위의 `WellFounded.fix`:
+
+    f params := fix lt_wf (fun n ih params hm => 본문) (m params) params rfl      (hm : m params = n)
+
+본문의 재귀 호출 `f(b)`는 `ih (m b) pf b rfl`가 된다. `pf : lt (m b) n`은 `decreasing_by`(기본 `omega`)가 그 호출 지점의 문맥에서 증명한다.
+문맥에는 `hm`, 그리고 `if c {..} else {..}`의 조건 `c = true/false`가 들어 있다 (`if`가 `Bool.rec (fun b => c = b → R) .. c rfl`로 컴파일된다).
+`omega`는 `nat_lt`/`nat_beq`의 `= true/false` 사실을 `lt`/`=`/`≠`로 바꿔 쓴다. 커널은 `fix`를 계산하지 못하므로(접근성 증명이 불투명) 본문을 한 번 더
+재귀 호출을 일반 호출로 둔 채 엘라보레이션해서 풀이 등식 `f.eq : f params = 본문`을 `WellFounded.fix_eq`와 `congr_arg`로 증명한다.
+인터프리터는 `fix`를 일반 고정점으로 실행한다.

@@ -535,3 +535,83 @@ theorem sub_cases(a: Nat, b: Nat): Or<And<le(a, b), nat_sub(a, b) = 0>, And<lt(b
         },
     }
 }
+theorem acc_aux(n: Nat): forall(m: Nat) -> lt(m, n) -> Acc(lt, m) := by {
+    induction n with {
+        zero => { intro m h; exact False.elim(not_succ_le_zero(m, h)) },
+        succ(k, ih) => {
+            intro m h;
+            exact Acc.intro(m, |y: Nat| |hy: lt(y, m)| ih(y, le_trans(Nat.succ(y), m, k, hy, le_of_succ_le_succ(m, k, h))))
+        },
+    }
+}
+theorem lt_wf(): WellFounded(lt) := by {
+    intro n;
+    exact acc_aux(Nat.succ(n), n, le_refl(Nat.succ(n)))
+}
+theorem lt_false_le(a: Nat, b: Nat): nat_lt(a, b) = false -> le(b, a) := by {
+    induction a generalizing b with {
+        zero => {
+            cases b with {
+                zero => { intro h; exact le_refl(0) },
+                succ(m) => { intro h; exact False.elim(false_ne_true(Eq.symm(h))) },
+            }
+        },
+        succ(k, ih) => {
+            cases b with {
+                zero => { intro h; exact zero_le(Nat.succ(k)) },
+                succ(m) => { intro h; exact succ_le_succ(m, k, ih(m, h)) },
+            }
+        },
+    }
+}
+theorem beq_refl(a: Nat): nat_beq(a, a) = true := by {
+    induction a with {
+        zero => { rfl },
+        succ(k, ih) => { exact ih },
+    }
+}
+theorem beq_false_ne(a: Nat, b: Nat, h: nat_beq(a, b) = false): Not<a = b> := by {
+    intro e;
+    rw [<- e] at h;
+    exact false_ne_true(Eq.trans(Eq.symm(h), beq_refl(a)))
+}
+theorem bool_cases(c: Bool): Or<c = true, c = false> := by {
+    cases c with {
+        false => { right; rfl },
+        true => { left; rfl },
+    }
+}
+theorem rem_aux_lt(fuel: Nat, a: Nat, b: Nat): lt(a, fuel) -> lt(0, b) -> lt(nat_rem_aux(fuel, a, b), b) := by {
+    induction fuel generalizing a with {
+        zero => { intro h hb; exact False.elim(not_succ_le_zero(a, h)) },
+        succ(f, ih) => {
+            intro h hb;
+            cases bool_cases(nat_lt(a, b)) with {
+                inl(c) => {
+                    show lt(if nat_lt(a, b) { a } else { nat_rem_aux(f, nat_sub(a, b), b) }, b);
+                    rw [c];
+                    exact lt_sound(a, b, c)
+                },
+                inr(c) => {
+                    show lt(if nat_lt(a, b) { a } else { nat_rem_aux(f, nat_sub(a, b), b) }, b);
+                    rw [c];
+                    have hle: le(b, a) := lt_false_le(a, b, c);
+                    have hlt: lt(nat_sub(a, b), f) := by { omega };
+                    exact ih(nat_sub(a, b), hlt, hb)
+                },
+            }
+        },
+    }
+}
+theorem rem_lt(a: Nat, b: Nat, hb: lt(0, b)): lt(nat_rem(a, b), b) := by {
+    cases b with {
+        zero => { exact False.elim(not_succ_le_zero(0, hb)) },
+        succ(m) => { exact rem_aux_lt(Nat.succ(a), a, Nat.succ(m), le_refl(Nat.succ(a)), hb) },
+    }
+}
+theorem beq_of_pos(b: Nat, h: lt(0, b)): nat_beq(b, 0) = false := by {
+    cases b with {
+        zero => { exact False.elim(not_succ_le_zero(0, h)) },
+        succ(m) => { rfl },
+    }
+}

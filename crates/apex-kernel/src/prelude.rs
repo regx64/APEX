@@ -159,6 +159,7 @@ pub fn add_prelude(env: &mut Env) -> KResult<()> {
     add_io(env)?;
     add_logic(env)?;
     add_quot(env)?;
+    add_wf(env)?;
     for ind in ["Nat", "Bool", "Unit", "List"] {
         env.add_below_brec(ind)?;
     }
@@ -1033,6 +1034,402 @@ fn add_quot(env: &mut Env) -> KResult<()> {
             ),
         )
         .build()?,
+    )?;
+    Ok(())
+}
+
+/// Accessibility and well-founded recursion: `Acc`, `WellFounded`, `WellFounded.fix` and
+/// its unfolding equation `WellFounded.fix_eq`. Functions defined by well-founded
+/// recursion do not compute in the kernel (the accessibility proof is opaque); the
+/// equation is what proofs use, and the interpreter runs `fix` as a plain fixpoint.
+fn add_wf(env: &mut Env) -> KResult<()> {
+    let u = Level::param("u");
+    let w = Level::param("v");
+    let rel = |al: Raw| arrow(al.clone(), arrow(al, prop()));
+    let acc = |al: Raw, r: Raw, x: Raw| app_(cl("Acc", vec![u.clone()]), vec![al, r, x]);
+    // inductive Acc.{u} {α : Sort u} (r : α → α → Prop) : α → Prop
+    //   | intro (x : α) (h : ∀ y, r y x → Acc r y) : Acc r x
+    env.add_inductive(InductiveDecl {
+        name: "Acc".into(),
+        lparams: vec!["u".into()],
+        nparams: 2,
+        ty: pi_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            pi_m(Mult::Zero, "r", rel(v("α")), arrow(v("α"), prop())),
+        )
+        .build()?,
+        ctors: vec![(
+            "Acc.intro".into(),
+            pi_m(
+                Mult::Zero,
+                "α",
+                sort_(u.clone()),
+                pi_m(
+                    Mult::Zero,
+                    "r",
+                    rel(v("α")),
+                    pi_(
+                        "x",
+                        v("α"),
+                        arrow(
+                            pi_(
+                                "y",
+                                v("α"),
+                                arrow(
+                                    app_(v("r"), vec![v("y"), v("x")]),
+                                    acc(v("α"), v("r"), v("y")),
+                                ),
+                            ),
+                            acc(v("α"), v("r"), v("x")),
+                        ),
+                    ),
+                ),
+            )
+            .build()?,
+        )],
+    })?;
+    // the step function's type: ∀ x, (∀ y, r y x → C y) → C x
+    let step_ty = || {
+        pi_(
+            "x",
+            v("α"),
+            arrow(
+                pi_(
+                    "y",
+                    v("α"),
+                    arrow(
+                        app_(v("r"), vec![v("y"), v("x")]),
+                        app_(v("C"), vec![v("y")]),
+                    ),
+                ),
+                app_(v("C"), vec![v("x")]),
+            ),
+        )
+    };
+    let c_ty = || arrow(v("α"), sort_(w.clone()));
+    // Acc.fix {α r C} (F) (x) (h : Acc r x) : C x
+    env.add_def(
+        "Acc.fix",
+        &["u", "v"],
+        pi_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            pi_m(
+                Mult::Zero,
+                "r",
+                rel(v("α")),
+                pi_m(
+                    Mult::Zero,
+                    "C",
+                    c_ty(),
+                    pi_(
+                        "F",
+                        step_ty(),
+                        pi_(
+                            "x",
+                            v("α"),
+                            arrow(acc(v("α"), v("r"), v("x")), app_(v("C"), vec![v("x")])),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+        lam_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            lam_m(
+                Mult::Zero,
+                "r",
+                rel(v("α")),
+                lam_m(
+                    Mult::Zero,
+                    "C",
+                    c_ty(),
+                    lam_(
+                        "F",
+                        step_ty(),
+                        lam_(
+                            "x",
+                            v("α"),
+                            lam_(
+                                "h",
+                                acc(v("α"), v("r"), v("x")),
+                                app_(
+                                    cl("Acc.rec", vec![w.clone(), u.clone()]),
+                                    vec![
+                                        v("α"),
+                                        v("r"),
+                                        lam_(
+                                            "x",
+                                            v("α"),
+                                            lam_(
+                                                "_",
+                                                acc(v("α"), v("r"), v("x")),
+                                                app_(v("C"), vec![v("x")]),
+                                            ),
+                                        ),
+                                        lam_(
+                                            "x",
+                                            v("α"),
+                                            lam_(
+                                                "h'",
+                                                pi_(
+                                                    "y",
+                                                    v("α"),
+                                                    arrow(
+                                                        app_(v("r"), vec![v("y"), v("x")]),
+                                                        acc(v("α"), v("r"), v("y")),
+                                                    ),
+                                                ),
+                                                lam_(
+                                                    "ih",
+                                                    pi_(
+                                                        "y",
+                                                        v("α"),
+                                                        arrow(
+                                                            app_(v("r"), vec![v("y"), v("x")]),
+                                                            app_(v("C"), vec![v("y")]),
+                                                        ),
+                                                    ),
+                                                    app_(v("F"), vec![v("x"), v("ih")]),
+                                                ),
+                                            ),
+                                        ),
+                                        v("x"),
+                                        v("h"),
+                                    ],
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        .build()?,
+    )?;
+    // WellFounded r := ∀ a, Acc r a
+    let wf_body = |_: ()| pi_("a", v("α"), acc(v("α"), v("r"), v("a")));
+    env.add_def(
+        "WellFounded",
+        &["u"],
+        pi_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            pi_m(Mult::Zero, "r", rel(v("α")), prop()),
+        )
+        .build()?,
+        lam_m(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            lam_m(Mult::Zero, "r", rel(v("α")), wf_body(())),
+        )
+        .build()?,
+    )?;
+    let wf = |al: Raw, r: Raw| app_(cl("WellFounded", vec![u.clone()]), vec![al, r]);
+    let fix_c = || {
+        app_(
+            cl("Acc.fix", vec![u.clone(), w.clone()]),
+            vec![
+                v("α"),
+                v("r"),
+                v("C"),
+                v("F"),
+                v("x"),
+                app_(v("hwf"), vec![v("x")]),
+            ],
+        )
+    };
+    // WellFounded.fix {α r C} (hwf : WellFounded r) (F) (x) : C x
+    let fix_binders = |body: Raw, lam: bool| {
+        let mk = |m: Mult, n: &str, t: Raw, b: Raw| {
+            if lam {
+                lam_m(m, n, t, b)
+            } else {
+                pi_m(m, n, t, b)
+            }
+        };
+        mk(
+            Mult::Zero,
+            "α",
+            sort_(u.clone()),
+            mk(
+                Mult::Zero,
+                "r",
+                rel(v("α")),
+                mk(
+                    Mult::Zero,
+                    "C",
+                    c_ty(),
+                    mk(
+                        Mult::Omega,
+                        "hwf",
+                        wf(v("α"), v("r")),
+                        mk(
+                            Mult::Omega,
+                            "F",
+                            step_ty(),
+                            mk(Mult::Omega, "x", v("α"), body),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    };
+    env.add_def(
+        "WellFounded.fix",
+        &["u", "v"],
+        fix_binders(app_(v("C"), vec![v("x")]), false).build()?,
+        fix_binders(fix_c(), true).build()?,
+    )?;
+    // WellFounded.fix_eq: fix hwf F x = F x (fun y _ => fix hwf F y)
+    let fix_of = |y: Raw| {
+        app_(
+            cl("WellFounded.fix", vec![u.clone(), w.clone()]),
+            vec![v("α"), v("r"), v("C"), v("hwf"), v("F"), y],
+        )
+    };
+    let rhs = || {
+        app_(
+            v("F"),
+            vec![
+                v("x"),
+                lam_(
+                    "y",
+                    v("α"),
+                    lam_("_", app_(v("r"), vec![v("y"), v("x")]), fix_of(v("y"))),
+                ),
+            ],
+        )
+    };
+    let eq_c =
+        |x: Raw, a: Raw, b: Raw| app_(cl("Eq", vec![w.clone()]), vec![app_(v("C"), vec![x]), a, b]);
+    // the equation for a fixed accessibility proof, by Acc.rec
+    let acc_fix_of = |y: Raw, h: Raw| {
+        app_(
+            cl("Acc.fix", vec![u.clone(), w.clone()]),
+            vec![v("α"), v("r"), v("C"), v("F"), y, h],
+        )
+    };
+    let by_rec = app_(
+        cl("Acc.rec", vec![Level::zero(), u.clone()]),
+        vec![
+            v("α"),
+            v("r"),
+            lam_(
+                "z",
+                v("α"),
+                lam_(
+                    "h",
+                    acc(v("α"), v("r"), v("z")),
+                    eq_c(
+                        v("z"),
+                        acc_fix_of(v("z"), v("h")),
+                        app_(
+                            v("F"),
+                            vec![
+                                v("z"),
+                                lam_(
+                                    "y",
+                                    v("α"),
+                                    lam_(
+                                        "_",
+                                        app_(v("r"), vec![v("y"), v("z")]),
+                                        acc_fix_of(v("y"), app_(v("hwf"), vec![v("y")])),
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ),
+                ),
+            ),
+            lam_(
+                "z",
+                v("α"),
+                lam_(
+                    "h'",
+                    pi_(
+                        "y",
+                        v("α"),
+                        arrow(
+                            app_(v("r"), vec![v("y"), v("z")]),
+                            acc(v("α"), v("r"), v("y")),
+                        ),
+                    ),
+                    lam_(
+                        "ih",
+                        pi_(
+                            "y",
+                            v("α"),
+                            pi_(
+                                "hy",
+                                app_(v("r"), vec![v("y"), v("z")]),
+                                eq_c(
+                                    v("y"),
+                                    acc_fix_of(v("y"), app_(v("h'"), vec![v("y"), v("hy")])),
+                                    app_(
+                                        v("F"),
+                                        vec![
+                                            v("y"),
+                                            lam_(
+                                                "w",
+                                                v("α"),
+                                                lam_(
+                                                    "_",
+                                                    app_(v("r"), vec![v("w"), v("y")]),
+                                                    acc_fix_of(
+                                                        v("w"),
+                                                        app_(v("hwf"), vec![v("w")]),
+                                                    ),
+                                                ),
+                                            ),
+                                        ],
+                                    ),
+                                ),
+                            ),
+                        ),
+                        app_(
+                            cl("Eq.refl", vec![w.clone()]),
+                            vec![
+                                app_(v("C"), vec![v("z")]),
+                                app_(
+                                    v("F"),
+                                    vec![
+                                        v("z"),
+                                        lam_(
+                                            "y",
+                                            v("α"),
+                                            lam_(
+                                                "hy",
+                                                app_(v("r"), vec![v("y"), v("z")]),
+                                                acc_fix_of(
+                                                    v("y"),
+                                                    app_(v("h'"), vec![v("y"), v("hy")]),
+                                                ),
+                                            ),
+                                        ),
+                                    ],
+                                ),
+                            ],
+                        ),
+                    ),
+                ),
+            ),
+            v("x"),
+            app_(v("hwf"), vec![v("x")]),
+        ],
+    );
+    env.add_def(
+        "WellFounded.fix_eq",
+        &["u", "v"],
+        fix_binders(eq_c(v("x"), fix_of(v("x")), rhs()), false).build()?,
+        fix_binders(by_rec, true).build()?,
     )?;
     Ok(())
 }

@@ -72,6 +72,16 @@ pub struct FnDecl {
     pub ret: Option<Expr>,
     /// `None` for a signature ending in `;` (trait methods).
     pub body: Option<Block>,
+    /// `termination_by e` (and `decreasing_by { .. }`): recursion on a measure.
+    pub wf: Option<WfSpec>,
+}
+
+/// Well-founded recursion: a `Nat`-valued measure that must decrease on every
+/// recursive call, and the tactic proof of that (default: `omega`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WfSpec {
+    pub measure: Expr,
+    pub decreasing: Option<Vec<Token>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
