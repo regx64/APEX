@@ -78,6 +78,14 @@ const TACTIC_WORDS: &[&str] = &[
     "induction",
     "cases",
     "revert",
+    "try",
+    "repeat",
+    "first",
+    "all_goals",
+    "any_goals",
+    "skip",
+    "done",
+    "fail",
     "exists",
     "generalizing",
     "with",
@@ -241,9 +249,118 @@ impl Parser {
         Ok(Some(arms))
     }
 
+    /// A tactic, with `t1 <;> t2` chains.
     fn tactic(&mut self) -> PResult<Tactic> {
+        let start = self.span();
+        let mut t = self.tactic_primary()?;
+        while *self.peek() == T::Lt
+            && self
+                .toks
+                .get(self.pos + 1)
+                .is_some_and(|x| x.kind == T::Semi)
+            && self.toks.get(self.pos + 2).is_some_and(|x| x.kind == T::Gt)
+        {
+            self.bump();
+            self.bump();
+            self.bump();
+            let rhs = self.tactic_primary()?;
+            t = Tactic {
+                kind: TacticKind::Then(Box::new(t), Box::new(rhs)),
+                span: start.to(self.prev_span()),
+            };
+        }
+        Ok(t)
+    }
+
+    /// A user-defined tactic: expand its body with the arguments substituted.
+    fn expand_tactic_macro(&mut self, name: &str) -> PResult<Tactic> {
         use TacticKind as K;
         let start = self.span();
+        self.bump();
+        let (params, body) = self.nt.tactics[name].clone();
+        let mut args: Vec<Vec<Token>> = Vec::new();
+        if !params.is_empty() || *self.peek() == T::LParen {
+            self.expect(&T::LParen)?;
+            let mut depth = 0;
+            let mut cur: Vec<Token> = Vec::new();
+            loop {
+                match self.peek() {
+                    T::Eof => return self.err("unclosed `(` in tactic macro call"),
+                    T::RParen if depth == 0 => break,
+                    T::Comma if depth == 0 => {
+                        args.push(std::mem::take(&mut cur));
+                        self.bump();
+                        continue;
+                    }
+                    T::LParen | T::LBracket | T::LBrace => depth += 1,
+                    T::RParen | T::RBracket | T::RBrace => depth -= 1,
+                    _ => {}
+                }
+                cur.push(self.bump());
+            }
+            if !cur.is_empty() || !args.is_empty() {
+                args.push(cur);
+            }
+            self.expect(&T::RParen)?;
+        }
+        if args.len() != params.len() {
+            return self.err(format!(
+                "tactic `{name}` takes {} arguments, found {}",
+                params.len(),
+                args.len()
+            ));
+        }
+        let mut toks = Vec::new();
+        for t in &body {
+            match &t.kind {
+                T::Ident(n) if params.contains(n) => {
+                    let a = &args[params.iter().position(|p| p == n).expect("param")];
+                    let wrap = a.len() > 1;
+                    if wrap {
+                        toks.push(Token {
+                            kind: T::LParen,
+                            span: t.span,
+                        });
+                    }
+                    toks.extend(a.iter().cloned());
+                    if wrap {
+                        toks.push(Token {
+                            kind: T::RParen,
+                            span: t.span,
+                        });
+                    }
+                }
+                _ => toks.push(t.clone()),
+            }
+        }
+        toks.push(Token {
+            kind: T::Eof,
+            span: self.prev_span(),
+        });
+        let mut sub = Parser {
+            toks,
+            pos: 0,
+            ty_mode: false,
+            nt: self.nt.clone(),
+        };
+        let seq = sub.tactic_seq()?;
+        if *sub.peek() != T::Eof {
+            return sub.err("unexpected token in tactic macro body");
+        }
+        Ok(Tactic {
+            kind: K::Seq(seq),
+            span: start.to(self.prev_span()),
+        })
+    }
+
+    fn tactic_primary(&mut self) -> PResult<Tactic> {
+        use TacticKind as K;
+        let start = self.span();
+        if let T::Ident(w) = self.peek().clone() {
+            if self.nt.tactics.contains_key(&w) {
+                return self.expand_tactic_macro(&w);
+            }
+        }
         if *self.peek() == T::LBrace {
             let body = self.tactic_block()?;
             return Ok(Tactic {
@@ -257,6 +374,29 @@ impl Parser {
         };
         self.bump();
         let kind = match word.as_str() {
+            "try" => K::Try(Box::new(self.tactic_primary()?)),
+            "repeat" => K::Repeat(Box::new(self.tactic_primary()?)),
+            "all_goals" => K::AllGoals(Box::new(self.tactic_primary()?)),
+            "any_goals" => K::AnyGoals(Box::new(self.tactic_primary()?)),
+            "skip" => K::Skip,
+            "done" => K::Done,
+            "fail" => match self.peek().clone() {
+                T::Str(m) => {
+                    self.bump();
+                    K::Fail(m)
+                }
+                _ => K::Fail("`fail` tactic".into()),
+            },
+            "first" => {
+                let mut alts = Vec::new();
+                while self.eat(&T::Bar) {
+                    alts.push(self.tactic_primary()?);
+                }
+                if alts.is_empty() {
+                    return self.err("`first` needs alternatives: `first | t1 | t2`");
+                }
+                K::First(alts)
+            }
             "intro" => K::Intro(self.binder_names()?),
             "exact" => K::Exact(self.expr()?),
             "apply" => K::Apply(self.expr()?),
@@ -428,6 +568,7 @@ impl Parser {
                         | "infix"
                         | "prefix"
                         | "macro"
+                        | "tactic"
                 ) =>
             {
                 Some(w.clone())
@@ -485,6 +626,22 @@ impl Parser {
                         self.nt.infix.insert(op.clone(), (lbp, w == "infixr", func));
                     }
                     ItemKind::Notation(format!("{w} {prec} \"{op}\""))
+                }
+                "tactic" => {
+                    let name = self.ident()?.name;
+                    let mut params = Vec::new();
+                    if self.eat(&T::LParen) {
+                        while *self.peek() != T::RParen {
+                            params.push(self.ident()?.name);
+                            if !self.eat(&T::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect(&T::RParen)?;
+                    }
+                    let body = self.raw_braced_tokens()?;
+                    self.nt.tactics.insert(name.clone(), (params, body));
+                    ItemKind::Notation(format!("tactic {name}"))
                 }
                 "macro" => {
                     let name = self.ident()?.name;

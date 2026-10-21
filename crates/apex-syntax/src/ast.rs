@@ -17,6 +17,8 @@ pub struct Notations {
     pub infix: std::collections::HashMap<String, (u8, bool, String)>,
     pub prefix: std::collections::HashMap<String, (u8, String)>,
     pub macros: std::collections::HashMap<String, (Vec<String>, Expr)>,
+    /// `tactic name(params) { tokens }`: user-defined tactics (token substitution).
+    pub tactics: std::collections::HashMap<String, (Vec<String>, Vec<Token>)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -336,6 +338,24 @@ pub enum TacticKind {
     Exists(Expr),
     /// `{ ... }`: run on the first goal, which it must close.
     Block(Vec<Tactic>),
+    /// Tactics in sequence on the first goal and what it produces (a tactic macro's body).
+    Seq(Vec<Tactic>),
+    /// `try t`: `t`, or nothing if it fails.
+    Try(Box<Tactic>),
+    /// `repeat t`: `t` on the goal and on every goal it produces, until it fails.
+    Repeat(Box<Tactic>),
+    /// `first | t1 | t2`: the first alternative that works.
+    First(Vec<Tactic>),
+    /// `all_goals t`: on every goal; fails if it fails on any.
+    AllGoals(Box<Tactic>),
+    /// `any_goals t`: on every goal; fails only if it fails on all.
+    AnyGoals(Box<Tactic>),
+    /// `t1 <;> t2`: `t2` on every goal `t1` produces.
+    Then(Box<Tactic>, Box<Tactic>),
+    Skip,
+    /// Fails if any goal remains.
+    Done,
+    Fail(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

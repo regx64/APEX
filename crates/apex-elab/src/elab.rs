@@ -557,6 +557,7 @@ impl Elaborator {
         self.tables.notations.infix.extend(n.infix.clone());
         self.tables.notations.prefix.extend(n.prefix.clone());
         self.tables.notations.macros.extend(n.macros.clone());
+        self.tables.notations.tactics.extend(n.tactics.clone());
         for item in &m.items {
             self.elab_item(item)?;
         }

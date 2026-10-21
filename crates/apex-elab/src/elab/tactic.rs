@@ -192,6 +192,17 @@ impl<'a> Cx<'a> {
 
     fn run_one(&mut self, st: &mut Tac, t: &Tactic) -> R<()> {
         if st.goals.is_empty() {
+            // these are happy to have nothing to do
+            if matches!(
+                t.kind,
+                TacticKind::Try(_)
+                    | TacticKind::Skip
+                    | TacticKind::Repeat(_)
+                    | TacticKind::AllGoals(_)
+                    | TacticKind::Done
+            ) {
+                return Ok(());
+            }
             return err(t.span, "no goals left, but there is another tactic");
         }
         let g = st.goals.remove(0);
@@ -468,6 +479,88 @@ impl<'a> Cx<'a> {
             }
             TacticKind::Omega => self.t_omega(st, g, span),
             TacticKind::Auto => self.t_auto(st, g, span),
+            TacticKind::Skip => Ok(vec![g]),
+            TacticKind::Done => err(span, "`done` failed: there are goals left"),
+            TacticKind::Fail(m) => err(span, m.clone()),
+            TacticKind::Seq(ts) => {
+                let rest = std::mem::take(&mut st.goals);
+                st.goals = vec![g];
+                let r = self.run_seq(st, ts);
+                let produced = std::mem::replace(&mut st.goals, rest);
+                r?;
+                Ok(produced)
+            }
+            TacticKind::Try(t) => {
+                let snap = self.tc.snapshot();
+                let sol = st.sol.clone();
+                match self.step(st, g.clone(), t) {
+                    Ok(gs) => Ok(gs),
+                    Err(_) => {
+                        self.tc.restore(snap);
+                        st.sol = sol;
+                        Ok(vec![g])
+                    }
+                }
+            }
+            TacticKind::First(alts) => {
+                let mut last = None;
+                for t in alts {
+                    let snap = self.tc.snapshot();
+                    let sol = st.sol.clone();
+                    match self.step(st, g.clone(), t) {
+                        Ok(gs) => return Ok(gs),
+                        Err(e) => {
+                            self.tc.restore(snap);
+                            st.sol = sol;
+                            last = Some(e);
+                        }
+                    }
+                }
+                Err(last.unwrap_or_else(|| ElabError::new(span, "`first` has no alternatives")))
+            }
+            TacticKind::Repeat(t) => self.repeat_on(st, g, t, 64),
+            TacticKind::Then(a, b) => {
+                let first = self.step(st, g, a)?;
+                let mut out = Vec::new();
+                for ng in first {
+                    out.extend(self.run_on(st, ng, b)?);
+                }
+                Ok(out)
+            }
+            TacticKind::AllGoals(t) => {
+                let mut all = vec![g];
+                all.extend(std::mem::take(&mut st.goals));
+                let mut out = Vec::new();
+                for ng in all {
+                    out.extend(self.run_on(st, ng, t)?);
+                }
+                Ok(out)
+            }
+            TacticKind::AnyGoals(t) => {
+                let mut all = vec![g];
+                all.extend(std::mem::take(&mut st.goals));
+                let (mut out, mut worked) = (Vec::new(), false);
+                for ng in all {
+                    let snap = self.tc.snapshot();
+                    let sol = st.sol.clone();
+                    match self.run_on(st, ng.clone(), t) {
+                        Ok(gs) => {
+                            worked = true;
+                            out.extend(gs);
+                        }
+                        Err(_) => {
+                            self.tc.restore(snap);
+                            st.sol = sol;
+                            out.push(ng);
+                        }
+                    }
+                }
+                if worked {
+                    Ok(out)
+                } else {
+                    err(span, "`any_goals`: the tactic failed on every goal")
+                }
+            }
             TacticKind::Show(e) => {
                 let ty = self.elab_type(e)?;
                 self.solve_goals(false)?;
@@ -583,6 +676,42 @@ impl<'a> Cx<'a> {
                     span: e.span,
                 };
                 self.t_induct(st, ng, &x, &[], arms.as_deref(), false, span)
+            }
+        }
+    }
+
+    /// Run one tactic on one goal (goal list isolation: the other goals are not touched).
+    fn run_on(&mut self, st: &mut Tac, g: Goal, t: &Tactic) -> R<Vec<Goal>> {
+        self.scope = g.scope.clone();
+        if !matches!(&*self.tc.zonk(&mvar(g.mv)), Term::MVar(_)) {
+            return Ok(vec![]); // solved by unification
+        }
+        self.step(st, g, t)
+    }
+
+    /// `repeat t`: apply `t` to the goal and to the goals it produces, until it fails.
+    fn repeat_on(&mut self, st: &mut Tac, g: Goal, t: &Tactic, fuel: u32) -> R<Vec<Goal>> {
+        if fuel == 0 {
+            return Ok(vec![g]);
+        }
+        let snap = self.tc.snapshot();
+        let sol = st.sol.clone();
+        match self.run_on(st, g.clone(), t) {
+            Ok(gs) => {
+                // no progress: the same single goal back
+                if gs.len() == 1 && gs[0].mv == g.mv {
+                    return Ok(gs);
+                }
+                let mut out = Vec::new();
+                for ng in gs {
+                    out.extend(self.repeat_on(st, ng, t, fuel - 1)?);
+                }
+                Ok(out)
+            }
+            Err(_) => {
+                self.tc.restore(snap);
+                st.sol = sol;
+                Ok(vec![g])
             }
         }
     }
